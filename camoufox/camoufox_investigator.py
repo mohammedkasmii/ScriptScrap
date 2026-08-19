@@ -142,15 +142,60 @@ class WebHarvester:
         await route.continue_()
 
     async def capture_visual_state(self, page):
+        """Captures full-page screenshots and fully-styled offline HTML."""
         timestamp = datetime.now().strftime("%H%M%S")
         file_prefix = self.visual_dir / f"step_{self.step_counter:03d}_{timestamp}"
+        
         try:
+            # 1. Take the visual screenshot
             await page.screenshot(path=f"{file_prefix}.png", full_page=True)
-            html_content = await page.content()
+            
+            # 2. Inject JS to embed CSS stylesheets and preserve typed input values
+            html_content = await page.evaluate("""async () => {
+                // Fetch and inline all external stylesheets
+                const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
+                for (let link of links) {
+                    try {
+                        const res = await fetch(link.href);
+                        let css = await res.text();
+                        
+                        // Fix relative paths inside the CSS (like background images or fonts)
+                        const baseUrl = new URL(link.href);
+                        css = css.replace(/url\\((?!['"]?(?:data:|https:|http:))['"]?([^'"\\)]*)['"]?\\)/gi, (match, urlPath) => {
+                            return `url('${new URL(urlPath, baseUrl).href}')`;
+                        });
+                        
+                        const style = document.createElement('style');
+                        style.textContent = css;
+                        link.replaceWith(style);
+                    } catch (e) {}
+                }
+                
+                // Ensure typed text and checkboxes are hardcoded into the HTML attributes
+                document.querySelectorAll('input, textarea').forEach(el => {
+                    if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+                        if (el.checked) el.setAttribute('checked', 'checked');
+                        else el.removeAttribute('checked');
+                    } else {
+                        el.setAttribute('value', el.value);
+                    }
+                });
+                
+                return document.documentElement.outerHTML;
+            }""")
+            
+            # 3. Inject a <base> tag so relative <img> tags load from the live server offline
+            base_tag = f'<base href="{page.url}">'
+            if "<head>" in html_content:
+                html_content = html_content.replace("<head>", f"<head>\n    {base_tag}", 1)
+            else:
+                html_content = f"{base_tag}\n{html_content}"
+
             Path(f"{file_prefix}.html").write_text(html_content, encoding="utf-8")
             self.step_counter += 1
-        except Exception:
-            pass
+            
+        except Exception as e:
+            pass # Suppress transient errors if page navigates while saving
 
     async def handle_request(self, request):
         if request.resource_type in ["xhr", "fetch", "document"] and request.method != "OPTIONS":
