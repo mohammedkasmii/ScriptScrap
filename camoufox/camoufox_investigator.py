@@ -8,22 +8,67 @@ from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
 
-OUTPUT_DIR = Path("v12_camoufox_output")
+OUTPUT_DIR = Path("v13_investigation_output")
 
-# Third-party chat and error logging noise to ignore in the final code export
 NOISY_ENDPOINTS = {
     "iadvize.com", "usejimo.com", "iconify.design", "privacy-center.org",
-    "error-js", "utilisation-log", "events/log"
+    "error-js", "utilisation-log", "events/log", "dynatrace", "google-analytics"
 }
 
-# Only block heavy media to avoid tripping anti-bot JS integrity checks.
 STATIC_MEDIA_EXTENSIONS = {
-    ".mp3", ".mp4", ".wav", ".avi", ".mov"
+    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".woff", ".ttf", ".css", ".png", ".jpg"
 }
 
 # ============================================================
-# DEEP DOM PROBE (Forms, Iframes, Custom Comboboxes)
+# ACTIVE INTROSPECTION INJECTIONS
 # ============================================================
+HOOK_AND_OBSERVER_JS = """
+(() => {
+    window.functionHookLogs = [];
+    window.domMutations = [];
+
+    // 1. Time-Travel DOM Mutation Observer
+    window.addEventListener('DOMContentLoaded', () => {
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach((m) => {
+                if (m.target && (m.target.id || m.target.className)) {
+                    window.domMutations.push({
+                        time: Date.now(),
+                        type: m.type,
+                        targetId: m.target.id || m.target.className || m.target.tagName,
+                        addedNodes: m.addedNodes ? m.addedNodes.length : 0
+                    });
+                }
+            });
+        });
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+    });
+
+    // 2. Monkey Patching MCMA Legacy Math Formulas
+    function hookMCMAFunction(funcName) {
+        if (typeof window[funcName] === 'function' && !window[funcName].isHooked) {
+            const original = window[funcName];
+            window[funcName] = function(...args) {
+                const result = original.apply(this, args);
+                window.functionHookLogs.push({
+                    function: funcName,
+                    arguments: args,
+                    returned: result,
+                    timestamp: Date.now()
+                });
+                return result;
+            };
+            window[funcName].isHooked = true;
+        }
+    }
+
+    // Interval to hook functions even if loaded later via AJAX
+    setInterval(() => {
+        ['DevisCalculerMontantCharge', 'CalculerMntArrete', 'CalculerMontantVetuste', 'ValiderDevis', 'CalculerMontantDommage'].forEach(hookMCMAFunction);
+    }, 2000);
+})();
+"""
+
 DOM_PROBE_JS = """
 (() => {
     function querySelectorAllDeep(selector, root = document) {
@@ -69,19 +114,7 @@ DOM_PROBE_JS = """
         fields: querySelectorAllDeep("input, select, textarea, button", form).map(parseElement)
     }));
 
-    const standaloneInputs = querySelectorAllDeep("body input:not(form input), body select:not(form select)")
-        .map(parseElement);
-
-    const customPickers = querySelectorAllDeep('[role="combobox"], [role="listbox"], [class*="select"]')
-        .map(el => ({
-            tag: el.tagName.toLowerCase(),
-            role: el.getAttribute("role"),
-            id: el.id || null,
-            name: el.getAttribute("name") || null,
-            currentText: (el.innerText || el.textContent || "").trim().slice(0, 100)
-        }));
-
-    return { forms, standaloneInputs, customPickers };
+    return { forms };
 })();
 """
 
@@ -93,40 +126,34 @@ class WebHarvester:
         self.dom_snapshots = []
         self.value_origins = {}
         self.value_dependencies = []
+        self.openapi_paths = {}
+        
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-        # Visual Snapshot Storage
         self.visual_dir = OUTPUT_DIR / "visual_traces"
         self.visual_dir.mkdir(parents=True, exist_ok=True)
         self.step_counter = 1
 
     async def route_filter(self, route):
-        """Only blocks heavy media to avoid tripping anti-bot JS integrity checks."""
         url = route.request.url.lower()
         parsed = urlparse(url)
-        
         if any(parsed.path.endswith(ext) for ext in STATIC_MEDIA_EXTENSIONS):
             await route.abort()
             return
-            
         await route.continue_()
 
     async def capture_visual_state(self, page):
-        """Captures full-page screenshots and raw HTML files for offline visual recreation."""
         timestamp = datetime.now().strftime("%H%M%S")
         file_prefix = self.visual_dir / f"step_{self.step_counter:03d}_{timestamp}"
-        
         try:
             await page.screenshot(path=f"{file_prefix}.png", full_page=True)
             html_content = await page.content()
             Path(f"{file_prefix}.html").write_text(html_content, encoding="utf-8")
-            print(f"📸 [VISUAL TRACE] Saved Screenshot & HTML -> Step {self.step_counter:03d}")
             self.step_counter += 1
         except Exception:
             pass
 
     async def handle_request(self, request):
-        if request.resource_type in ["xhr", "fetch"] and request.method != "OPTIONS":
+        if request.resource_type in ["xhr", "fetch", "document"] and request.method != "OPTIONS":
             url = request.url
             method = request.method.upper()
             
@@ -137,11 +164,11 @@ class WebHarvester:
             post_data = request.post_data
             parsed_json = None
             
-            if post_data and "application/json" in headers.get("content-type", "").lower():
+            if post_data:
                 try: 
                     parsed_json = json.loads(post_data)
                 except Exception: 
-                    parsed_json = post_data
+                    pass
 
             url_path = urlparse(url).path or "/"
             key = (method, url_path)
@@ -152,16 +179,20 @@ class WebHarvester:
                     "url": url,
                     "headers": headers, 
                     "sample_payloads": [], 
-                    "statuses": set()
+                    "statuses": set(),
+                    "response_samples": []
                 }
 
             if parsed_json and len(self.endpoints[key]["sample_payloads"]) < 2:
                 self.endpoints[key]["sample_payloads"].append(parsed_json)
+            elif post_data and not parsed_json and len(self.endpoints[key]["sample_payloads"]) < 2:
+                self.endpoints[key]["sample_payloads"].append(post_data) # Capture raw forms/multipart
 
             self.network_log.append({
                 "time": datetime.now().isoformat(), 
                 "method": method,
                 "url": url, 
+                "headers": headers,
                 "body": parsed_json or post_data
             })
             
@@ -170,22 +201,36 @@ class WebHarvester:
             if isinstance(parsed_json, (dict, list)):
                 self._correlate_dependencies(parsed_json, method, url_path)
 
+            self._build_openapi_request(method, url_path, parsed_json or post_data)
+
     async def handle_response(self, response):
         req = response.request
-        if req.resource_type in ["xhr", "fetch"] and req.method != "OPTIONS":
+        if req.resource_type in ["xhr", "fetch", "document"] and req.method != "OPTIONS":
             url_path = urlparse(req.url).path or "/"
             key = (req.method.upper(), url_path)
+            
             if key in self.endpoints:
                 self.endpoints[key]["statuses"].add(response.status)
 
-            headers = await response.all_headers()
-            if "application/json" in headers.get("content-type", "").lower():
+            try:
+                resp_text = await response.text()
                 try:
-                    data = await response.json()
+                    data = json.loads(resp_text)
                     self._map_response_tokens(data, req.method.upper(), url_path)
-                except Exception:
-                    pass
+                    
+                    if len(self.endpoints.get(key, {}).get("response_samples", [])) < 2:
+                        self.endpoints[key]["response_samples"].append(data)
+                except json.JSONDecodeError:
+                    if len(self.endpoints.get(key, {}).get("response_samples", [])) < 1:
+                        self.endpoints[key]["response_samples"].append(resp_text[:500] + "...")
+                        
+                self._build_openapi_response(req.method.upper(), url_path, response.status, data if 'data' in locals() else resp_text[:500])
+            except Exception:
+                pass
 
+    # ==========================================
+    # DATA CORRELATION & OPENAPI
+    # ==========================================
     def _map_response_tokens(self, data, method, path, prefix=""):
         if isinstance(data, dict):
             for k, v in data.items(): 
@@ -213,53 +258,107 @@ class WebHarvester:
                 link = {"source": origin, "consumer": {"endpoint": f"{method} {path}", "field": prefix}}
                 if link not in self.value_dependencies:
                     self.value_dependencies.append(link)
-                    print(f"  [CHAIN LINK] {origin['origin_endpoint']} ({origin['field']}) -> {method} {path} ({prefix})")
 
+    def _build_openapi_request(self, method, path, payload):
+        if path not in self.openapi_paths:
+            self.openapi_paths[path] = {}
+        
+        m_lower = method.lower()
+        if m_lower not in self.openapi_paths[path]:
+            self.openapi_paths[path][m_lower] = {
+                "summary": f"Auto-captured {path}",
+                "responses": {}
+            }
+            
+        if payload:
+            content_type = "application/json" if isinstance(payload, (dict, list)) else "application/x-www-form-urlencoded"
+            self.openapi_paths[path][m_lower]["requestBody"] = {
+                "content": {
+                    content_type: {
+                        "schema": {"type": "object"},
+                        "example": payload
+                    }
+                }
+            }
+
+    def _build_openapi_response(self, method, path, status, payload):
+        m_lower = method.lower()
+        if path in self.openapi_paths and m_lower in self.openapi_paths[path]:
+            content_type = "application/json" if isinstance(payload, (dict, list)) else "text/html"
+            self.openapi_paths[path][m_lower]["responses"][str(status)] = {
+                "description": "Auto-captured response",
+                "content": {
+                    content_type: {
+                        "example": payload
+                    }
+                }
+            }
+
+    # ==========================================
+    # FINAL EXPORT ENGINES
+    # ==========================================
     async def scan_all_frames(self, page):
         results = []
-        for idx, frame in enumerate(page.frames):
+        for frame in page.frames:
             try:
                 dom = await frame.evaluate(DOM_PROBE_JS)
                 results.append({"frame_url": frame.url, "data": dom})
             except Exception: 
                 pass
-            
         self.dom_snapshots.append({"time": datetime.now().isoformat(), "frames": results})
+
+    async def extract_active_introspection(self, page):
+        """Pulls Hooks, Dropdowns, and jQuery events before closing."""
+        print("\n[*] Dumping Dropdown Catalogs & jQuery Events...")
+        
+        self.catalogs = await page.evaluate("""() => {
+            let dict = {};
+            document.querySelectorAll('select').forEach(sel => {
+                let options = [];
+                sel.querySelectorAll('option').forEach(opt => {
+                    options.push({id: opt.value, label: opt.innerText.trim()});
+                });
+                if(sel.id || sel.name) dict[sel.id || sel.name] = options;
+            });
+            return dict;
+        }""")
+
+        self.jquery_events = await page.evaluate("""() => {
+            let eventsMap = {};
+            if (window.jQuery) {
+                window.jQuery('*').each(function() {
+                    let ev_data = window.jQuery._data(this, 'events');
+                    if (ev_data) {
+                        let id = this.id ? '#' + this.id : (this.className ? '.' + this.className : this.tagName);
+                        eventsMap[id] = Object.keys(ev_data);
+                    }
+                });
+            }
+            return eventsMap;
+        }""")
+
+        self.js_hooks = await page.evaluate("window.functionHookLogs || []")
+        self.mutations = await page.evaluate("window.domMutations || []")
 
     def generate_httpx_code(self) -> str:
         code_blocks = [
-            "import httpx",
-            "import asyncio",
-            "import json\n",
+            "import httpx", "import asyncio", "import json\n",
             "# Auto-generated clean microservice API client\n"
         ]
         for idx, ((method, path), meta) in enumerate(self.endpoints.items()):
             fn_name = re.sub(r"[^a-zA-Z0-9_]+", "_", f"{method.lower()}_{path.strip('/')}") or f"req_{idx}"
-            clean_headers = {
-                k: v for k, v in meta["headers"].items() 
-                if not k.startswith(":") and k.lower() not in ["content-length", "host"]
-            }
-            
+            clean_headers = {k: v for k, v in meta["headers"].items() if not k.startswith(":") and k.lower() not in ["content-length", "host"]}
             sample_body = meta["sample_payloads"][0] if meta["sample_payloads"] else None
-            body_arg = f"json.loads('''{json.dumps(sample_body)}''')" if sample_body else "None"
+            body_arg = f"json.loads('''{json.dumps(sample_body)}''')" if isinstance(sample_body, dict) else "None"
 
             fn = f"""
 async def {fn_name}(payload: dict = None, custom_headers: dict = None):
     url = "{meta['url']}"
     headers = {json.dumps(clean_headers, indent=4)}
-    if custom_headers:
-        headers.update(custom_headers)
-        
+    if custom_headers: headers.update(custom_headers)
     async with httpx.AsyncClient(verify=False) as client:
-        res = await client.{method.lower()}(
-            url, 
-            headers=headers, 
-            json=payload if payload is not None else {body_arg}
-        )
-        try:
-            return res.json()
-        except Exception:
-            return res.text
+        res = await client.{method.lower()}(url, headers=headers, json=payload if payload is not None else {body_arg})
+        return res.json() if "application/json" in res.headers.get("content-type", "") else res.text
 """
             code_blocks.append(fn.strip() + "\n")
         return "\n".join(code_blocks)
@@ -270,25 +369,20 @@ async def {fn_name}(payload: dict = None, custom_headers: dict = None):
         (OUTPUT_DIR / "api_dependencies.json").write_text(json.dumps(self.value_dependencies, indent=2, ensure_ascii=False), encoding="utf-8")
         (OUTPUT_DIR / "generated_client.py").write_text(self.generate_httpx_code(), encoding="utf-8")
         
-        md = [
-            "# Investigation Report",
-            f"**Target:** `{self.target_url}`",
-            f"**Generated:** `{datetime.now().isoformat()}`\n",
-            "## Discovered Business APIs\n"
-        ]
-        for (m, p), meta in self.endpoints.items():
-            statuses = ", ".join(str(s) for s in sorted(meta["statuses"])) or "None"
-            md.append(f"### `{m}` `{p}`")
-            md.append(f"- **URL:** `{meta['url']}`")
-            md.append(f"- **Statuses:** `{statuses}`")
-            if meta["sample_payloads"]:
-                md.append("```json")
-                md.append(json.dumps(meta["sample_payloads"][0], indent=2))
-                md.append("```")
-            md.append("")
+        # New Introspection Dumps
+        (OUTPUT_DIR / "dropdown_catalogs.json").write_text(json.dumps(getattr(self, 'catalogs', {}), indent=2, ensure_ascii=False), encoding="utf-8")
+        (OUTPUT_DIR / "jquery_events.json").write_text(json.dumps(getattr(self, 'jquery_events', {}), indent=2, ensure_ascii=False), encoding="utf-8")
+        (OUTPUT_DIR / "js_hooks_and_mutations.json").write_text(json.dumps({"function_calls": getattr(self, 'js_hooks', []), "dom_mutations": getattr(self, 'mutations', [])}, indent=2), encoding="utf-8")
 
-        (OUTPUT_DIR / "INVESTIGATION_REPORT.md").write_text("\n".join(md), encoding="utf-8")
-        print(f"\n🏆 All 5 data files & visual traces exported to ./{OUTPUT_DIR.name}/")
+        # OpenAPI Spec
+        openapi_spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "MCMA Auto-Synthesized API", "version": "1.0"},
+            "paths": self.openapi_paths
+        }
+        (OUTPUT_DIR / "mcma_openapi_spec.json").write_text(json.dumps(openapi_spec, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        print(f"\n🏆 All 8 data files & visual traces exported to ./{OUTPUT_DIR.name}/")
 
 async def background_dom_scanner(page, engine):
     last_hash = ""
@@ -311,21 +405,13 @@ async def main():
 
     engine = WebHarvester(target_url)
 
-    print("\n🦊 [CAMOUFOX] Booting engine-level anti-detect browser...")
-    
+    print("\n🦊 [CAMOUFOX] Booting active introspection engine...")
     try:
-        async with AsyncCamoufox(
-            headless=False,
-            humanize=True,
-            os="windows",
-            geoip=False,
-            enable_cache=True
-        ) as browser:
+        async with AsyncCamoufox(headless=False, humanize=True, os="windows", geoip=False, enable_cache=True) as browser:
+            page = await browser.new_page(locale="fr-FR", timezone_id="Europe/Paris")
             
-            page = await browser.new_page(
-                locale="fr-FR",
-                timezone_id="Europe/Paris"
-            )
+            # Add early Hooks and Observers
+            await page.add_init_script(HOOK_AND_OBSERVER_JS)
             
             await page.route("**/*", engine.route_filter)
             page.on("request", engine.handle_request)
@@ -333,19 +419,21 @@ async def main():
 
             print(f"🚀 Infiltrating {target_url}...")
             await page.goto(target_url, wait_until="load")
-            await page.wait_for_timeout(2000)
 
             scanner_task = asyncio.create_task(background_dom_scanner(page, engine))
 
             print("\n" + "=" * 60)
             print("🟢 AUTOMATIC SPY IS ACTIVE")
-            print("1. Interact with the website normally.")
-            print("2. The script captures DOM, Visuals & APIs automatically.")
+            print("1. Interact with the website normally (process a Garage Conventionné dossier).")
+            print("2. The script captures full bodies, OpenAPI specs, and JS functions automatically.")
             print("3. Press ENTER in this terminal ONLY when you are done.")
             print("=" * 60 + "\n")
 
             await asyncio.to_thread(input, "")
             scanner_task.cancel()
+            
+            # Final dump of hidden in-memory state
+            await engine.extract_active_introspection(page)
             
     except Exception as e:
         print(f"\n⚠️ Session interrupted: {e}")
