@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Sensitive Auth / Session State (Do NOT commit cookies/session tokens)
+mcma_auth_state.json
+
+# Temporary PDF processing directory
+temp/
+*.tmp
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Investigation dumps, traces & screenshots
+v12_camoufox_output/
+script spy/
+script\ spy/
+
+

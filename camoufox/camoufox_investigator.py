@@ -16,7 +16,7 @@ NOISY_ENDPOINTS = {
 }
 
 STATIC_MEDIA_EXTENSIONS = {
-    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".woff", ".ttf", ".css", ".png", ".jpg"
+    ".mp3", ".mp4", ".wav", ".avi", ".mov"
 }
 
 # ============================================================
