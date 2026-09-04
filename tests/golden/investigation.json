@@ -9,6 +9,16 @@
         "field": "missionId",
         "origin_endpoint": "GET /api/dossier"
       }
+    },
+    {
+      "consumer": {
+        "endpoint": "POST /api/apply",
+        "field": "itemReference"
+      },
+      "source": {
+        "field": "reference",
+        "origin_endpoint": "GET /api/items/101"
+      }
     }
   ],
   "dom_structure.json": [
@@ -111,7 +121,7 @@
                     "placeholder": null,
                     "tag": "input",
                     "type": "hidden",
-                    "value": "FIXTURE-CSRF-TOKEN-0001"
+                    "value": "FIXTURE_CSRF_TOKEN_0001"
                   },
                   {
                     "id": "mission",
@@ -136,6 +146,14 @@
                     "tag": "input",
                     "type": "text",
                     "value": "lecture-seule"
+                  },
+                  {
+                    "id": "courriel",
+                    "name": "courriel",
+                    "placeholder": null,
+                    "tag": "input",
+                    "type": "email",
+                    "value": ""
                   },
                   {
                     "id": "pw",
@@ -334,7 +352,7 @@
                     "placeholder": null,
                     "tag": "input",
                     "type": "hidden",
-                    "value": "FIXTURE-CSRF-TOKEN-0001"
+                    "value": "FIXTURE_CSRF_TOKEN_0001"
                   },
                   {
                     "id": "mission",
@@ -361,12 +379,20 @@
                     "value": "lecture-seule"
                   },
                   {
+                    "id": "courriel",
+                    "name": "courriel",
+                    "placeholder": null,
+                    "tag": "input",
+                    "type": "email",
+                    "value": "fixture@example.test"
+                  },
+                  {
                     "id": "pw",
                     "name": "pw",
                     "placeholder": null,
                     "tag": "input",
                     "type": "password",
-                    "value": "fixture-password-not-a-real-secret"
+                    "value": "FIXTURE_PASSWORD_DO_NOT_USE"
                   },
                   {
                     "id": "btn-submit",
@@ -557,7 +583,7 @@
                     "placeholder": null,
                     "tag": "input",
                     "type": "hidden",
-                    "value": "FIXTURE-CSRF-TOKEN-0001"
+                    "value": "FIXTURE_CSRF_TOKEN_0001"
                   },
                   {
                     "id": "mission",
@@ -584,12 +610,20 @@
                     "value": "lecture-seule"
                   },
                   {
+                    "id": "courriel",
+                    "name": "courriel",
+                    "placeholder": null,
+                    "tag": "input",
+                    "type": "email",
+                    "value": "fixture@example.test"
+                  },
+                  {
                     "id": "pw",
                     "name": "pw",
                     "placeholder": null,
                     "tag": "input",
                     "type": "password",
-                    "value": "fixture-password-not-a-real-secret"
+                    "value": "FIXTURE_PASSWORD_DO_NOT_USE"
                   },
                   {
                     "id": "btn-submit",
@@ -737,7 +771,7 @@
               }
             ]
           },
-          "frame_url": "http://127.0.0.1:<PORT>/page2?nom=Alice+Benali&notes=Dossier+44718+-+vitre+laterale&accord=oui&typeSinistre=choc&ville=mar&garage=GAR-0011&__RequestVerificationToken=FIXTURE-CSRF-TOKEN-0001&missionId=M-FIXTURE-0001&lecture=lecture-seule&pw=fixture-password-not-a-real-secret&dynamique=valeur-dynamique"
+          "frame_url": "http://127.0.0.1:<PORT>/page2?nom=Alice+Benali&notes=Dossier+44718+-+vitre+laterale&accord=oui&typeSinistre=choc&ville=mar&garage=GAR-0011&__RequestVerificationToken=FIXTURE_CSRF_TOKEN_0001&missionId=M-FIXTURE-0001&lecture=lecture-seule&courriel=fixture%40example.test&pw=FIXTURE_PASSWORD_DO_NOT_USE&dynamique=valeur-dynamique"
         }
       ],
       "time": "<TS>"
@@ -758,7 +792,7 @@
   "events.jsonl": {
     "by_source": {
       "engine": 18,
-      "playwright": 35
+      "playwright": 57
     },
     "by_type": {
       "capture_gap": 6,
@@ -766,25 +800,26 @@
       "dom_snapshot": 4,
       "frame_attached": 2,
       "frame_detached": 2,
-      "frame_navigated": 4,
+      "frame_navigated": 7,
       "html_snapshot": 3,
-      "http_request": 11,
-      "http_response": 11,
-      "navigation_committed": 2,
+      "http_request": 19,
+      "http_response": 19,
+      "navigation_committed": 5,
       "page_closed": 1,
       "page_opened": 1,
-      "runtime_fetch": 6,
+      "runtime_fetch": 14,
+      "runtime_history": 3,
       "runtime_hooks": 1,
       "screenshot": 3,
       "session_end": 1,
       "session_start": 1,
       "storage_snapshot": 1,
       "user_change": 4,
-      "user_click": 10,
-      "user_input": 7,
+      "user_click": 20,
+      "user_input": 8,
       "user_submit": 1
     },
-    "dom_mutations_observed": 15,
+    "dom_mutations_observed": 33,
     "first_type": "session_start",
     "last_type": "session_end",
     "lifecycle_order_by_source": {
@@ -813,6 +848,9 @@
         "navigation_committed",
         "frame_attached",
         "frame_attached",
+        "navigation_committed",
+        "navigation_committed",
+        "navigation_committed",
         "frame_detached",
         "frame_detached",
         "navigation_committed",
@@ -834,6 +872,7 @@
         "user_input",
         "user_change",
         "user_input",
+        "user_input",
         "user_click",
         "runtime_fetch",
         "user_click",
@@ -844,6 +883,27 @@
         "runtime_fetch",
         "user_click",
         "runtime_fetch",
+        "user_click",
+        "user_click",
+        "user_click",
+        "runtime_fetch",
+        "user_click",
+        "runtime_fetch",
+        "runtime_fetch",
+        "runtime_fetch",
+        "user_click",
+        "runtime_fetch",
+        "runtime_fetch",
+        "runtime_fetch",
+        "user_click",
+        "runtime_fetch",
+        "user_click",
+        "runtime_history",
+        "user_click",
+        "runtime_history",
+        "user_click",
+        "runtime_history",
+        "user_click",
         "user_click",
         "user_click",
         "user_click",
@@ -880,13 +940,18 @@
       "get_",
       "get_api_dossier",
       "get_api_error",
+      "get_api_items_101",
+      "get_api_items_102",
+      "get_api_items_103",
       "get_api_redirect",
       "get_api_redirected",
       "get_api_referentiel",
       "get_frame_inner",
       "get_frame_outer",
       "get_page2",
+      "post_api_apply",
       "post_api_form",
+      "post_api_graphql",
       "post_api_valider"
     ],
     "reads_credentials_from_env": true
@@ -916,6 +981,40 @@
             }
           },
           "summary": "Auto-captured /"
+        }
+      },
+      "/api/apply": {
+        "post": {
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "actif": 1,
+                  "itemReference": "ITEMREF-AA0101",
+                  "statut": "OK"
+                },
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "example": {
+                    "actif": 1,
+                    "applied": true,
+                    "itemReference": "ITEMREF-AA0101",
+                    "statut": "OK"
+                  }
+                }
+              },
+              "description": "Auto-captured response"
+            }
+          },
+          "summary": "Auto-captured /api/apply"
         }
       },
       "/api/dossier": {
@@ -967,7 +1066,7 @@
           "requestBody": {
             "content": {
               "application/x-www-form-urlencoded": {
-                "example": "nom=Alice%20Benali&ville=mar&__RequestVerificationToken=FIXTURE-CSRF-TOKEN-0001",
+                "example": "nom=Alice%20Benali&ville=mar&__RequestVerificationToken=FIXTURE_CSRF_TOKEN_0001",
                 "schema": {
                   "type": "object"
                 }
@@ -980,7 +1079,7 @@
                 "application/json": {
                   "example": {
                     "received": {
-                      "__RequestVerificationToken": "FIXTURE-CSRF-TOKEN-0001",
+                      "__RequestVerificationToken": "FIXTURE_CSRF_TOKEN_0001",
                       "nom": "Alice Benali",
                       "ville": "mar"
                     },
@@ -992,6 +1091,109 @@
             }
           },
           "summary": "Auto-captured /api/form"
+        }
+      },
+      "/api/graphql": {
+        "post": {
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "operationName": "ValiderItem",
+                  "query": "mutation ValiderItem($id: ID!, $note: String) { validerItem(id: $id, note: $note) { id statut } }",
+                  "variables": {
+                    "id": "ITEM-0001",
+                    "note": "fixture"
+                  }
+                },
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "example": {
+                    "data": {
+                      "validerItem": {
+                        "id": "ITEM-0001",
+                        "statut": "VALIDE"
+                      }
+                    }
+                  }
+                }
+              },
+              "description": "Auto-captured response"
+            }
+          },
+          "summary": "Auto-captured /api/graphql"
+        }
+      },
+      "/api/items/101": {
+        "get": {
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "example": {
+                    "actif": 1,
+                    "id": 101,
+                    "libelle": "Item cent un",
+                    "reference": "ITEMREF-AA0101",
+                    "statut": "OK"
+                  }
+                }
+              },
+              "description": "Auto-captured response"
+            }
+          },
+          "summary": "Auto-captured /api/items/101"
+        }
+      },
+      "/api/items/102": {
+        "get": {
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "example": {
+                    "actif": 1,
+                    "id": 102,
+                    "libelle": "Item cent deux",
+                    "note": "note presente uniquement sur cet item",
+                    "reference": "ITEMREF-BB0102",
+                    "statut": "ARCHIVE"
+                  }
+                }
+              },
+              "description": "Auto-captured response"
+            }
+          },
+          "summary": "Auto-captured /api/items/102"
+        }
+      },
+      "/api/items/103": {
+        "get": {
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "example": {
+                    "actif": 1,
+                    "id": 103,
+                    "libelle": "Item cent trois",
+                    "reference": "ITEMREF-CC0103",
+                    "statut": "OK"
+                  }
+                }
+              },
+              "description": "Auto-captured response"
+            }
+          },
+          "summary": "Auto-captured /api/items/103"
         }
       },
       "/api/redirect": {
@@ -1172,7 +1374,7 @@
         "accept-encoding": "gzip, deflate, br, zstd",
         "accept-language": "fr-FR",
         "connection": "keep-alive",
-        "cookie": "fixture_session=FIXTURE-SESSION-0001",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
         "host": "127.0.0.1:<PORT>",
         "referer": "http://127.0.0.1:<PORT>/",
         "sec-fetch-dest": "empty",
@@ -1191,7 +1393,121 @@
         "accept-encoding": "gzip, deflate, br, zstd",
         "accept-language": "fr-FR",
         "connection": "keep-alive",
-        "cookie": "fixture_session=FIXTURE-SESSION-0001",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
+        "host": "127.0.0.1:<PORT>",
+        "referer": "http://127.0.0.1:<PORT>/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
+      },
+      "method": "GET",
+      "time": "<TS>",
+      "url": "http://127.0.0.1:<PORT>/api/items/101"
+    },
+    {
+      "body": null,
+      "headers": {
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "fr-FR",
+        "connection": "keep-alive",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
+        "host": "127.0.0.1:<PORT>",
+        "referer": "http://127.0.0.1:<PORT>/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
+      },
+      "method": "GET",
+      "time": "<TS>",
+      "url": "http://127.0.0.1:<PORT>/api/items/101"
+    },
+    {
+      "body": null,
+      "headers": {
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "fr-FR",
+        "connection": "keep-alive",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
+        "host": "127.0.0.1:<PORT>",
+        "referer": "http://127.0.0.1:<PORT>/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
+      },
+      "method": "GET",
+      "time": "<TS>",
+      "url": "http://127.0.0.1:<PORT>/api/items/102"
+    },
+    {
+      "body": null,
+      "headers": {
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "fr-FR",
+        "connection": "keep-alive",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
+        "host": "127.0.0.1:<PORT>",
+        "referer": "http://127.0.0.1:<PORT>/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
+      },
+      "method": "GET",
+      "time": "<TS>",
+      "url": "http://127.0.0.1:<PORT>/api/items/102"
+    },
+    {
+      "body": null,
+      "headers": {
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "fr-FR",
+        "connection": "keep-alive",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
+        "host": "127.0.0.1:<PORT>",
+        "referer": "http://127.0.0.1:<PORT>/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
+      },
+      "method": "GET",
+      "time": "<TS>",
+      "url": "http://127.0.0.1:<PORT>/api/items/103"
+    },
+    {
+      "body": null,
+      "headers": {
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "fr-FR",
+        "connection": "keep-alive",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
+        "host": "127.0.0.1:<PORT>",
+        "referer": "http://127.0.0.1:<PORT>/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
+      },
+      "method": "GET",
+      "time": "<TS>",
+      "url": "http://127.0.0.1:<PORT>/api/items/103"
+    },
+    {
+      "body": null,
+      "headers": {
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "fr-FR",
+        "connection": "keep-alive",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
         "host": "127.0.0.1:<PORT>",
         "referer": "http://127.0.0.1:<PORT>/",
         "sec-fetch-dest": "empty",
@@ -1210,7 +1526,7 @@
         "accept-encoding": "gzip, deflate, br, zstd",
         "accept-language": "fr-FR",
         "connection": "keep-alive",
-        "cookie": "fixture_session=FIXTURE-SESSION-0001",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
         "host": "127.0.0.1:<PORT>",
         "referer": "http://127.0.0.1:<PORT>/",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
@@ -1282,7 +1598,7 @@
         "accept-encoding": "gzip, deflate, br, zstd",
         "accept-language": "fr-FR",
         "connection": "keep-alive",
-        "cookie": "fixture_session=FIXTURE-SESSION-0001",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
         "host": "127.0.0.1:<PORT>",
         "referer": "http://127.0.0.1:<PORT>/",
         "sec-fetch-dest": "document",
@@ -1294,10 +1610,36 @@
       },
       "method": "GET",
       "time": "<TS>",
-      "url": "http://127.0.0.1:<PORT>/page2?nom=Alice+Benali&notes=Dossier+44718+-+vitre+laterale&accord=oui&typeSinistre=choc&ville=mar&garage=GAR-0011&__RequestVerificationToken=FIXTURE-CSRF-TOKEN-0001&missionId=M-FIXTURE-0001&lecture=lecture-seule&pw=fixture-password-not-a-real-secret&dynamique=valeur-dynamique"
+      "url": "http://127.0.0.1:<PORT>/page2?nom=Alice+Benali&notes=Dossier+44718+-+vitre+laterale&accord=oui&typeSinistre=choc&ville=mar&garage=GAR-0011&__RequestVerificationToken=FIXTURE_CSRF_TOKEN_0001&missionId=M-FIXTURE-0001&lecture=lecture-seule&courriel=fixture%40example.test&pw=FIXTURE_PASSWORD_DO_NOT_USE&dynamique=valeur-dynamique"
     },
     {
-      "body": "nom=Alice%20Benali&ville=mar&__RequestVerificationToken=FIXTURE-CSRF-TOKEN-0001",
+      "body": {
+        "actif": 1,
+        "itemReference": "ITEMREF-AA0101",
+        "statut": "OK"
+      },
+      "headers": {
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "fr-FR",
+        "connection": "keep-alive",
+        "content-length": "58",
+        "content-type": "application/json",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
+        "host": "127.0.0.1:<PORT>",
+        "origin": "http://127.0.0.1:<PORT>",
+        "referer": "http://127.0.0.1:<PORT>/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
+      },
+      "method": "POST",
+      "time": "<TS>",
+      "url": "http://127.0.0.1:<PORT>/api/apply"
+    },
+    {
+      "body": "nom=Alice%20Benali&ville=mar&__RequestVerificationToken=FIXTURE_CSRF_TOKEN_0001",
       "headers": {
         "accept": "*/*",
         "accept-encoding": "gzip, deflate, br, zstd",
@@ -1305,7 +1647,7 @@
         "connection": "keep-alive",
         "content-length": "79",
         "content-type": "application/x-www-form-urlencoded",
-        "cookie": "fixture_session=FIXTURE-SESSION-0001",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
         "host": "127.0.0.1:<PORT>",
         "origin": "http://127.0.0.1:<PORT>",
         "referer": "http://127.0.0.1:<PORT>/",
@@ -1320,6 +1662,35 @@
     },
     {
       "body": {
+        "operationName": "ValiderItem",
+        "query": "mutation ValiderItem($id: ID!, $note: String) { validerItem(id: $id, note: $note) { id statut } }",
+        "variables": {
+          "id": "ITEM-0001",
+          "note": "fixture"
+        }
+      },
+      "headers": {
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "fr-FR",
+        "connection": "keep-alive",
+        "content-length": "187",
+        "content-type": "application/json",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
+        "host": "127.0.0.1:<PORT>",
+        "origin": "http://127.0.0.1:<PORT>",
+        "referer": "http://127.0.0.1:<PORT>/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
+      },
+      "method": "POST",
+      "time": "<TS>",
+      "url": "http://127.0.0.1:<PORT>/api/graphql"
+    },
+    {
+      "body": {
         "missionId": "M-FIXTURE-0001",
         "montant": 300
       },
@@ -1330,7 +1701,7 @@
         "connection": "keep-alive",
         "content-length": "44",
         "content-type": "application/json",
-        "cookie": "fixture_session=FIXTURE-SESSION-0001",
+        "cookie": "fixture_session=FIXTURE_SESSION_TOKEN_0001",
         "host": "127.0.0.1:<PORT>",
         "origin": "http://127.0.0.1:<PORT>",
         "referer": "http://127.0.0.1:<PORT>/",
@@ -1392,10 +1763,10 @@
       ]
     },
     "counters": {
-      "dependency_edges": 1,
+      "dependency_edges": 2,
       "dom_snapshots": 4,
-      "endpoints_in_scope": 11,
-      "network_events_logged": 11,
+      "endpoints_in_scope": 16,
+      "network_events_logged": 19,
       "out_of_scope_endpoints": 0,
       "visual_captures_skipped_out_of_scope": 0,
       "visual_traces": 3
@@ -1415,7 +1786,11 @@
       "note": "Events are written alongside the outputs above, incrementally, so an interrupted session still leaves a readable history. The structures in this manifest remain the behavioural authority; nothing reads the event log to produce them yet."
     },
     "finished_at": "<TS>",
-    "graphql_operations": {},
+    "graphql_operations": {
+      "/api/graphql": [
+        "mutation ValiderItem"
+      ]
+    },
     "known_blind_spots": [
       "Service-worker traffic is invisible to Playwright on Firefox. When a service worker is detected a capture_gap is emitted.",
       "WebSocket handshake headers are not exposed by Playwright, so auth sent on the upgrade is unobserved. Frames themselves ARE captured.",
@@ -1490,7 +1865,7 @@
     },
     "session_id": "<SESSION>",
     "snapshot_fidelity": {
-      "controls_serialized": 36,
+      "controls_serialized": 38,
       "failures": 0,
       "index_mismatches": 0,
       "last_error": null,

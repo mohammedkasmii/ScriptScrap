@@ -45,6 +45,14 @@ Thumbs.db
 *scraped_output*/
 sessions/
 visual_traces/
+
+# Derived analysis artifacts. session.sqlite is rebuildable from events.jsonl,
+# and export/shared/ is sanitised but still describes a real application.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+export/shared/
+analysis/report.md
 script spy/
 script\ spy/
 

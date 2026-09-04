@@ -111,7 +111,11 @@ async def run_scripted_investigation(
             await page.check("#type-choc")
             await page.select_option("#ville", "mar")
             await page.select_option("#garage", "GAR-0011")
-            await page.fill("#pw", "fixture-password-not-a-real-secret")
+            # Unmistakably synthetic: these values exist so redaction and
+            # credential-classification have something to trip on, and so a
+            # reader of the committed golden data cannot mistake them for real.
+            await page.fill("#courriel", "fixture@example.test")
+            await page.fill("#pw", "FIXTURE_PASSWORD_DO_NOT_USE")
             checkpoint()
 
             # -- 3. load dossier: the correlation SOURCE ------------------
@@ -150,6 +154,39 @@ async def run_scripted_investigation(
             await page.wait_for_timeout(150)
             await engine.scan_all_frames(page)
             await engine.capture_visual_state(page)
+            checkpoint()
+
+            # -- 7b. M3 inference cases -----------------------------------
+            #     Sibling item paths (templating), a unique reference that
+            #     propagates into /api/apply (dependency), common values that
+            #     must NOT correlate, three SPA states, and a control whose id
+            #     regenerates on every render (selector instability).
+            # A named GraphQL mutation, so operation identity and technology
+            # detection have real evidence in the baseline log.
+            await page.click("#btn-graphql")
+            await page.wait_for_function(
+                "document.querySelector('#resultat').textContent.startsWith('graphql:')")
+
+            # Twice: three items over two statuses is below the enum threshold,
+            # and the right answer is to give the inference more evidence rather
+            # than to lower the bar it has to clear.
+            for _ in range(2):
+                await page.click("#btn-items")
+                await page.wait_for_function(
+                    "document.querySelector('#items-log').textContent"
+                    ".split('ITEMREF-CC0103').length > 1")
+                await page.wait_for_timeout(150)
+            await page.click("#btn-appliquer")
+            await page.wait_for_function(
+                "document.querySelector('#resultat').textContent.startsWith('applique:')")
+
+            for state_button in ("#btn-etat-liste", "#btn-etat-detail", "#btn-etat-resume"):
+                await page.click(state_button)
+                await page.wait_for_timeout(120)
+
+            for _ in range(3):
+                await page.click("#zone-instable button")
+                await page.wait_for_timeout(80)
             checkpoint()
 
             # -- 8. full navigation ---------------------------------------

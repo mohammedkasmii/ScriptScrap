@@ -79,6 +79,42 @@ SSE_SCRIPT: tuple[tuple[str | None, str], ...] = (
 )
 
 
+# Three sibling items, so endpoint templating has evidence to work from.
+# Each seeds something the analysis layer must handle:
+#   reference  -- unique, correlates into /api/apply (must be FOUND)
+#   statut     -- a small closed set (enum candidate), and "OK" is a common
+#                 value that must NOT be treated as a dependency
+#   note       -- present on ONE item only (observed-optional)
+_ITEMS: dict[str, dict[str, Any]] = {
+    "101": {"id": 101, "reference": "ITEMREF-AA0101", "statut": "OK",
+            "libelle": "Item cent un", "actif": 1},
+    "102": {"id": 102, "reference": "ITEMREF-BB0102", "statut": "ARCHIVE",
+            "libelle": "Item cent deux", "actif": 1,
+            "note": "note presente uniquement sur cet item"},
+    "103": {"id": 103, "reference": "ITEMREF-CC0103", "statut": "OK",
+            "libelle": "Item cent trois", "actif": 1},
+}
+
+
+def _item_payload(item_id: str) -> dict[str, Any]:
+    item = _ITEMS.get(item_id)
+    if item is None:
+        return {"error": "not_found", "code": "E-FIXTURE-404", "id": item_id}
+    return dict(item)
+
+
+def _apply_payload(body: str | None) -> dict[str, Any]:
+    reference = None
+    if body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                reference = parsed.get("itemReference")
+        except ValueError:
+            pass
+    return {"applied": True, "itemReference": reference, "statut": "OK", "actif": 1}
+
+
 def _graphql_payload(body: str | None) -> dict[str, Any]:
     """Answer a GraphQL operation by name. Fixed responses, no schema."""
     operation = None
@@ -235,6 +271,8 @@ class _MainHandler(_FixtureHandler):
             )
         if path == "/api/sse":
             return _SSE_SENTINEL
+        if path.startswith("/api/items/"):
+            return _json(json.dumps(_item_payload(path.rsplit("/", 1)[-1])))
         if path.startswith("/api/"):
             return _NOT_FOUND_JSON_RESPONSE
         return _NOT_FOUND_HTML_RESPONSE
@@ -250,6 +288,8 @@ class _MainHandler(_FixtureHandler):
             return _json(json.dumps(_graphql_payload(body)))
         if path == "/api/beacon":
             return _Response(204, CT_JSON, b"")
+        if path == "/api/apply":
+            return _json(json.dumps(_apply_payload(body)))
         return _NOT_FOUND_JSON_RESPONSE
 
 

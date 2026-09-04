@@ -21,8 +21,8 @@ DEAD_URL_PLACEHOLDER = "__DEAD_URL__"
 # --------------------------------------------------------------------------- #
 FIXTURE_VERSION_HEADER = "X-Fixture-Version"
 FIXTURE_VERSION_VALUE = "1"
-FIXTURE_SESSION_COOKIE = "fixture_session=FIXTURE-SESSION-0001; Path=/"
-FIXTURE_CSRF_TOKEN = "FIXTURE-CSRF-TOKEN-0001"
+FIXTURE_SESSION_COOKIE = "fixture_session=FIXTURE_SESSION_TOKEN_0001; Path=/"
+FIXTURE_CSRF_TOKEN = "FIXTURE_CSRF_TOKEN_0001"
 FIXTURE_MISSION_ID = "M-FIXTURE-0001"
 
 # --------------------------------------------------------------------------- #
@@ -434,6 +434,14 @@ window.recalculerFixture = recalculerFixture;
     byId("btn-route").addEventListener("click", changerRoute);
     byId("btn-telecharger").addEventListener("click", telecharger);
 
+    // --- M3 inference exercises ---------------------------------------
+    byId("btn-items").addEventListener("click", chargerItems);
+    byId("btn-appliquer").addEventListener("click", appliquerItem);
+    byId("btn-etat-liste").addEventListener("click", allerListe);
+    byId("btn-etat-detail").addEventListener("click", allerDetail);
+    byId("btn-etat-resume").addEventListener("click", allerResume);
+    rendreBoutonInstable();
+
     attacherShadow();
     enregistrerHandlersJQuery();
     peuplerGarages();
@@ -539,6 +547,67 @@ window.recalculerFixture = recalculerFixture;
     history.replaceState({ etape: 3 }, "", "/#/etape/3");
   }
 
+  /* ---------------------------------------------------------------- *
+   * M3 inference exercises. Each seeds one thing the analysis layer
+   * must get right -- including two it must REJECT.
+   * ---------------------------------------------------------------- */
+
+  function chargerItems() {
+    // Sibling paths, so endpoint templating has evidence to work from.
+    var ids = [101, 102, 103];
+    return ids.reduce(function (chain, id) {
+      return chain.then(function () {
+        return fetch("/api/items/" + id).then(function (r) { return r.json(); })
+          .then(function (item) {
+            window.__fixtureItems = window.__fixtureItems || {};
+            window.__fixtureItems[id] = item;
+            byId("items-log").textContent += "[" + item.reference + "]";
+          });
+      });
+    }, Promise.resolve());
+  }
+
+  function appliquerItem() {
+    var item = (window.__fixtureItems || {})[101];
+    if (!item) return;
+    // itemReference <- reference: a name-similarity dependency.
+    // statut "OK" and actif 1 are COMMON values that must NOT correlate.
+    return fetch("/api/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        itemReference: item.reference,
+        statut: item.statut,
+        actif: 1
+      })
+    }).then(function (r) { return r.json(); })
+      .then(function (d) { byId("resultat").textContent = "applique:" + d.applied; });
+  }
+
+  function allerListe()  { history.pushState({}, "", "#/liste"); marquerEtat("liste"); }
+  function allerDetail() { history.pushState({}, "", "#/detail/101"); marquerEtat("detail"); }
+  function allerResume() { history.pushState({}, "", "#/resume"); marquerEtat("resume"); }
+
+  function marquerEtat(nom) {
+    byId("etat").textContent = nom;
+  }
+
+  var compteurInstable = 0;
+  function rendreBoutonInstable() {
+    // Same logical control, regenerated id every render: the case where an id
+    // locator scores badly and a semantic one does not.
+    compteurInstable += 1;
+    var hote = byId("zone-instable");
+    hote.innerHTML = "";
+    var bouton = document.createElement("button");
+    bouton.type = "button";
+    bouton.id = "ctl00_generated_" + compteurInstable + "_a1b2c3d4";
+    bouton.setAttribute("aria-label", "Action instable");
+    bouton.textContent = "Action instable";
+    bouton.addEventListener("click", rendreBoutonInstable);
+    hote.appendChild(bouton);
+  }
+
   function telecharger() {
     // A real navigation to an attachment response, so Playwright raises a
     // download event rather than a navigation.
@@ -598,7 +667,7 @@ MAIN_PAGE_HTML = """<!DOCTYPE html>
   <label for="garage">Garage</label>
   <select id="garage" name="garage"></select>
 
-  <input type="hidden" id="csrf" name="__RequestVerificationToken" value="FIXTURE-CSRF-TOKEN-0001">
+  <input type="hidden" id="csrf" name="__RequestVerificationToken" value="FIXTURE_CSRF_TOKEN_0001">
   <input type="hidden" id="mission" name="missionId" value="">
 
   <label for="champ-desactive">Desactive</label>
@@ -608,6 +677,9 @@ MAIN_PAGE_HTML = """<!DOCTYPE html>
   <input type="text" id="champ-lecture" name="lecture" value="lecture-seule" readonly>
 
   <label for="pw">Mot de passe</label>
+  <label for="courriel">Courriel</label>
+  <input type="email" id="courriel" name="courriel" value="">
+
   <input type="password" id="pw" name="pw" value="">
 
   <button type="submit" id="btn-submit">Envoyer</button>
@@ -632,11 +704,20 @@ MAIN_PAGE_HTML = """<!DOCTYPE html>
   <button type="button" id="btn-popup">Popup</button>
   <button type="button" id="btn-route">Route SPA</button>
   <button type="button" id="btn-telecharger">Telecharger</button>
+  <button type="button" id="btn-items">Charger items</button>
+  <button type="button" id="btn-appliquer">Appliquer</button>
+  <button type="button" id="btn-etat-liste">Etat liste</button>
+  <button type="button" id="btn-etat-detail">Etat detail</button>
+  <button type="button" id="btn-etat-resume">Etat resume</button>
 </div>
+
+<div id="zone-instable"></div>
 
 <div id="logs">
   <span id="ws-log"></span>
   <span id="sse-log"></span>
+  <span id="items-log"></span>
+  <span id="etat"></span>
 </div>
 
 <div id="resultat"></div>

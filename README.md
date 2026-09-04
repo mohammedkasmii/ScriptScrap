@@ -58,12 +58,41 @@ gitignored by pattern and carries its own `SECURITY.md`. Read
 configuration, the scope policy and the known blind spots that produced the
 evidence.
 
+## Analysing a session
+
+Analysis is **offline**: it reads the recorded event log and never launches a
+browser, so a session can be analysed and re-analysed from any machine.
+
+```bash
+uv run scriptscrap analyze v13_investigation_output   # -> session.sqlite + analysis/report.md
+uv run scriptscrap export  v13_investigation_output   # -> export/shared/dataset.json
+```
+
+`events.jsonl` is the source of truth; `session.sqlite` is derived and
+rebuildable — deleting it and re-running `analyze` reproduces it exactly
+(`--rebuild` does both).
+
+`analyze` derives endpoints (with path templating and query parameters), schemas
+with sample counts, scored dependency hypotheses, locator candidates with
+measured stability, observed states, and technology fingerprints. Every
+conclusion cites the raw `event_id`s that support it.
+
+`export` writes a **sanitised** dataset: credentials removed, identifiers and
+emails replaced by deterministic pseudonyms so value propagation stays
+analysable, and no raw bodies, screenshots or HTML.
+
 ## Layout
 
 ```
 camoufox/camoufox_investigator.py   the investigator (behavioural authority)
 src/scriptscrap/
   events/      append-only event spine + offline reader
+  sensors/     observation sensors (lifecycle, runtime, websocket, storage)
+  probe/       the injected in-page observer
+  analysis/    OFFLINE inference: endpoints, schemas, correlation, selectors,
+               states, technology. Imports no browser -- enforced by test.
+  export/      sanitised shareable dataset
+  cli.py       scriptscrap analyze / export
   fixture/     deterministic local app used as the test laboratory
   testing/     scripted capture, normalisation, golden snapshots
 diagnostics/   compatibility probes + environment doctor
