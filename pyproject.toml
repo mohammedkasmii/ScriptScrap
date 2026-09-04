@@ -1,0 +1,63 @@
+[project]
+name = "scriptscrap"
+version = "0.1.0"
+description = "Black-box web application investigation engine built on Camoufox"
+requires-python = ">=3.11"
+
+# Pinned exactly. These versions ARE part of the behavioural baseline: every
+# empirical finding in the evolution blueprint (JS world semantics, runtime hook
+# timing, uBlock default-addon filtering, snapshot non-destructiveness) was
+# verified against this exact stack. Do not bump without re-running
+# diagnostics/ and re-reviewing the golden master.
+dependencies = [
+    "camoufox==0.5.5",
+    "playwright==1.60.0",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = [{ include-group = "lint" }, { include-group = "test" }]
+lint = ["ruff"]
+test = ["pytest"]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "scriptscrap"
+module-root = "src"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "camoufox/v13_investigation_output",
+    # Superseded reference implementation. Kept for historical comparison only;
+    # the Camoufox investigator is the baseline. Not linted, not maintained.
+    "titan_investigator_v11.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I", "UP", "S", "C4", "SIM", "RET", "PTH"]
+ignore = [
+    "S101",  # assert is the point in tests
+    "E501",  # line length is handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The fixture app deliberately serves fixed, non-secret credential-shaped
+# values so the redaction and credential-classification paths have something
+# to bite on.
+"src/scriptscrap/fixture/*" = ["S105", "S106", "S104"]
+"tests/*" = ["S105", "S106"]
+"diagnostics/*" = ["S310"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "browser: launches Camoufox; slow. Deselect with -m 'not browser'.",
+]
+# An explicit basetemp avoids pytest's numbered-dir + "pytest-current" symlink
+# machinery, which needs symlink privileges Windows does not grant by default.
+addopts = "-ra --strict-markers --basetemp=.pytest_tmp"

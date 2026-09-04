@@ -1,16 +1,37 @@
 import asyncio
-import json
+import contextlib
 import hashlib
+import json
 import platform
 import re
 import sys
+from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 from pathlib import Path
-from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError, version as pkg_version
+from typing import Any
 from urllib.parse import urlparse
 
-from camoufox.async_api import AsyncCamoufox
 from camoufox.addons import DefaultAddons
+from camoufox.async_api import AsyncCamoufox
+
+# ---------------------------------------------------------------------------
+# Event spine (dual-write).
+#
+# The structures in WebHarvester remain the behavioural authority. Events are
+# emitted ALONGSIDE them so the model can be proven against real sessions before
+# anything depends on it. The import is defensive: this script must keep working
+# when run directly from a bare venv that has camoufox but not the scriptscrap
+# package installed. The supported path is `uv run`.
+# ---------------------------------------------------------------------------
+EV: Any
+try:
+    from scriptscrap import events as EV
+
+    EVENTS_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only in a bare venv
+    EV = None
+    EVENTS_AVAILABLE = False
 
 OUTPUT_DIR = Path("v13_investigation_output")
 
@@ -66,6 +87,9 @@ SENSITIVE_HEADERS = {
     "x-auth-token", "auth-token", "x-access-token", "access-token",
     "x-session-id", "x-session-token", "session-id",
     "x-amz-security-token", "x-goog-authuser", "x-ms-token",
+    # Short field names that the substring rules below cannot safely catch.
+    # Exact matches only, so they cannot produce false positives.
+    "pw", "pwd", "passwd", "pass",
 }
 
 # Substrings that mark a header as credential-bearing even when the exact name
@@ -126,6 +150,54 @@ class InvestigationScope:
                 "query strings", "screenshots", "HTML snapshots", "DOM structure",
             ],
         }
+
+
+def _split_captured_url(url: str) -> tuple[str, list[str], list[str]]:
+    """Split a captured URL into an endpoint and its parameter NAMES.
+
+    Query-string values are discarded, never emitted into generated source. A
+    GET form submission puts every field in the query string, so a captured URL
+    routinely carries passwords, CSRF tokens and personal data.
+
+    Returns (endpoint_url_without_query, all_param_names, credential_param_names).
+    """
+    parsed = urlparse(url)
+    endpoint = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    names: list[str] = []
+    for pair in parsed.query.split("&"):
+        if not pair:
+            continue
+        name = pair.split("=", 1)[0]
+        if name and name not in names:
+            names.append(name)
+    sensitive = [n for n in names if is_sensitive_header(n)]
+    return endpoint, names, sensitive
+
+
+def _frame_id_of(frame) -> str | None:
+    """A stable, human-meaningful frame label.
+
+    Playwright exposes no durable frame id, and an identity-based registry would
+    make golden-master runs depend on object lifetimes. Deriving the label from
+    the frame tree keeps it deterministic. Full frame identity is a later
+    milestone; this is enough to attribute events during M1.
+    """
+    if frame is None:
+        return None
+    try:
+        if frame.parent_frame is None:
+            return "main"
+        return frame.name or (urlparse(frame.url).path or "frame")
+    except Exception:
+        return None
+
+
+def _frame_id(request) -> str | None:
+    """Frame of a request. Playwright raises for service-worker-origin requests."""
+    try:
+        return _frame_id_of(request.frame)
+    except Exception:
+        return None
 
 
 def prompt_for_scope(target_url: str) -> InvestigationScope:
@@ -306,10 +378,20 @@ NON_DESTRUCTIVE_SNAPSHOT_JS = """
     }
 
     // 4. <base> so relative URLs still resolve when the file is opened offline.
+    //    The query string is stripped: relative-URL resolution ignores it, but a
+    //    GET form submission puts every field there, so keeping it would write
+    //    passwords and CSRF tokens into the snapshot.
     const head = clone.querySelector('head');
     if (head && !head.querySelector('base')) {
+        let baseHref = document.baseURI;
+        try {
+            const u = new URL(document.baseURI);
+            u.search = '';
+            u.hash = '';
+            baseHref = u.href;
+        } catch (e) { /* keep baseURI as-is */ }
         const base = document.createElement('base');
-        base.setAttribute('href', document.baseURI);
+        base.setAttribute('href', baseHref);
         head.insertBefore(base, head.firstChild);
     }
 
@@ -367,7 +449,7 @@ DOM_PROBE_JS = """
 """
 
 class WebHarvester:
-    def __init__(self, target_url: str, scope: InvestigationScope):
+    def __init__(self, target_url: str, scope: InvestigationScope, session_id: str | None = None):
         self.target_url = target_url
         self.scope = scope
         self.endpoints = {}
@@ -393,12 +475,63 @@ class WebHarvester:
             "last_error": None,
         }
         self.launch_options_record = {}
-        self.started_at = datetime.now(timezone.utc)
+        self.started_at = datetime.now(UTC)
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         self.visual_dir = OUTPUT_DIR / "visual_traces"
         self.visual_dir.mkdir(parents=True, exist_ok=True)
         self.step_counter = 1
+
+        # --- event spine, dual-write ---------------------------------------
+        # Written incrementally so a crash cannot destroy the session history.
+        self.session_id = session_id or datetime.now(UTC).strftime("sess-%Y%m%d-%H%M%S")
+        self.event_log = None
+        if EVENTS_AVAILABLE:
+            try:
+                self.event_log = EV.EventLog(OUTPUT_DIR / "events.jsonl", self.session_id)
+                self.event_log.emit(
+                    EV.Source.ENGINE,
+                    EV.EventType.SESSION_START,
+                    target_url=target_url,
+                    scope=scope.as_dict(),
+                )
+            except OSError as exc:
+                print(f"[events] disabled: {exc}")
+                self.event_log = None
+
+    # ==========================================
+    # EVENT SPINE (dual-write)
+    # ==========================================
+    def emit_event(self, source, event_type, **payload):
+        """Emit one event. A no-op when the spine is unavailable."""
+        if self.event_log is None:
+            return None
+        return self.event_log.emit(source, event_type, **payload)
+
+    def emit_sensor_error(self, where: str, exc: BaseException, **extra):
+        """ScriptScrap failed to observe something -- not the same as nothing happening."""
+        if self.event_log is None:
+            return None
+        return self.event_log.sensor_error(EV.Source.PLAYWRIGHT, where, exc, **extra)
+
+    def emit_capture_gap(self, reason: str, **extra):
+        if self.event_log is None:
+            return None
+        return self.event_log.capture_gap(EV.Source.ENGINE, reason, **extra)
+
+    def close_events(self):
+        if self.event_log is None:
+            return
+        self.event_log.emit(
+            EV.Source.ENGINE,
+            EV.EventType.SESSION_END,
+            counters={
+                "endpoints_in_scope": len(self.endpoints),
+                "network_events": len(self.network_log),
+                "out_of_scope_endpoints": len(self.out_of_scope),
+            },
+        )
+        self.event_log.close()
 
     # ==========================================
     # SCOPE ENFORCEMENT
@@ -417,7 +550,7 @@ class WebHarvester:
             "path": parsed.path or "/",
             "count": 0,
             "statuses": set(),
-            "first_seen": datetime.now(timezone.utc).isoformat(),
+            "first_seen": datetime.now(UTC).isoformat(),
         })
         if status is None:
             entry["count"] += 1
@@ -437,6 +570,11 @@ class WebHarvester:
         # Never screenshot or snapshot a page outside the engagement boundary.
         if not self.scope.contains(page.url):
             self.skipped_visual_captures += 1
+            self.emit_capture_gap(
+                "visual_capture_out_of_scope",
+                host=urlparse(page.url).hostname,
+                withheld=["screenshot", "html_snapshot"],
+            )
             return
 
         timestamp = datetime.now().strftime("%H%M%S")
@@ -467,6 +605,30 @@ class WebHarvester:
             if report.get("index_mismatch"):
                 self.snapshot_stats["index_mismatches"] += 1
 
+            self.emit_event(
+                EV.Source.ENGINE,
+                EV.EventType.SCREENSHOT,
+                url=page.url,
+                step=self.step_counter,
+                artifact=Path(f"{file_prefix}.png").name,
+            )
+            self.emit_event(
+                EV.Source.ENGINE,
+                EV.EventType.HTML_SNAPSHOT,
+                url=page.url,
+                step=self.step_counter,
+                artifact=Path(f"{file_prefix}.html").name,
+                bytes=len(result["html"]),
+                **report,
+            )
+            if report.get("sheets_not_readable"):
+                self.emit_capture_gap(
+                    "stylesheet_not_readable",
+                    url=page.url,
+                    count=report["sheets_not_readable"],
+                    note="cross-origin sheet; <link> retained, snapshot is partial",
+                )
+
             self.step_counter += 1
 
         except Exception as exc:
@@ -474,6 +636,7 @@ class WebHarvester:
             # but they must be counted rather than silently swallowed.
             self.snapshot_stats["failures"] += 1
             self.snapshot_stats["last_error"] = f"{type(exc).__name__}: {exc}"
+            self.emit_sensor_error("capture_visual_state", exc, url=page.url)
 
     async def handle_request(self, request):
         if request.resource_type in CAPTURED_RESOURCE_TYPES and request.method != "OPTIONS":
@@ -482,9 +645,23 @@ class WebHarvester:
 
             if not self.scope.contains(url):
                 self._record_out_of_scope(method, url)
+                parsed = urlparse(url)
+                self.emit_capture_gap(
+                    "out_of_scope",
+                    method=method,
+                    host=parsed.hostname,
+                    path=parsed.path or "/",
+                    withheld=["headers", "body", "query"],
+                )
                 return
 
             if any(noise in url for noise in NOISY_ENDPOINTS):
+                self.emit_capture_gap(
+                    "noisy_endpoint_dropped_at_capture",
+                    method=method,
+                    url=url,
+                    note="matched NOISY_ENDPOINTS; not recoverable from this session",
+                )
                 return
 
             headers = await request.all_headers()
@@ -492,10 +669,9 @@ class WebHarvester:
             parsed_json = None
             
             if post_data:
-                try: 
+                # A non-JSON body is normal (forms, multipart), not a failure.
+                with contextlib.suppress(ValueError):
                     parsed_json = json.loads(post_data)
-                except Exception: 
-                    pass
 
             url_path = urlparse(url).path or "/"
             key = (method, url_path)
@@ -524,11 +700,26 @@ class WebHarvester:
             })
             
             print(f"[API ->] {method:6} {url_path}")
-            
+
             if isinstance(parsed_json, (dict, list)):
                 self._correlate_dependencies(parsed_json, method, url_path)
 
             self._build_openapi_request(method, url_path, parsed_json or post_data)
+
+            self.emit_event(
+                EV.Source.PLAYWRIGHT,
+                EV.EventType.HTTP_REQUEST,
+                frame_id=_frame_id(request),
+                method=method,
+                url=url,
+                path=url_path,
+                resource_type=request.resource_type,
+                is_navigation=request.is_navigation_request(),
+                header_names=sorted(headers),
+                credential_header_names=sorted(h for h in headers if is_sensitive_header(h)),
+                body=parsed_json if parsed_json is not None else post_data,
+                body_present=post_data is not None,
+            )
 
     async def handle_response(self, response):
         req = response.request
@@ -544,21 +735,80 @@ class WebHarvester:
             if key in self.endpoints:
                 self.endpoints[key]["statuses"].add(response.status)
 
+            body_for_openapi = None
+            body_kind = None
             try:
                 resp_text = await response.text()
                 try:
                     data = json.loads(resp_text)
+                    body_kind = "json"
+                    body_for_openapi = data
                     self._map_response_tokens(data, req.method.upper(), url_path)
-                    
+
                     if len(self.endpoints.get(key, {}).get("response_samples", [])) < 2:
                         self.endpoints[key]["response_samples"].append(data)
                 except json.JSONDecodeError:
+                    body_kind = "text"
+                    body_for_openapi = resp_text[:500]
                     if len(self.endpoints.get(key, {}).get("response_samples", [])) < 1:
                         self.endpoints[key]["response_samples"].append(resp_text[:500] + "...")
-                        
-                self._build_openapi_response(req.method.upper(), url_path, response.status, data if 'data' in locals() else resp_text[:500])
-            except Exception:
-                pass
+
+                self._build_openapi_response(
+                    req.method.upper(), url_path, response.status, body_for_openapi)
+            except Exception as exc:
+                # Playwright throws for redirects, evicted bodies, and bodies read
+                # after navigation. That is a hole in the evidence, not a non-event.
+                self.emit_capture_gap(
+                    "response_body_unavailable",
+                    method=req.method.upper(),
+                    url=req.url,
+                    status=response.status,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+
+            self.emit_event(
+                EV.Source.PLAYWRIGHT,
+                EV.EventType.HTTP_RESPONSE,
+                frame_id=_frame_id(req),
+                method=req.method.upper(),
+                url=req.url,
+                path=url_path,
+                status=response.status,
+                body_kind=body_kind,
+                body=body_for_openapi,
+            )
+
+    async def handle_request_failed(self, request):
+        """A request the browser started but never completed.
+
+        Previously invisible. A blocked or aborted request looks identical to
+        'the application never made one' unless it is recorded.
+        """
+        if request.resource_type not in CAPTURED_RESOURCE_TYPES:
+            return
+        if not self.scope.contains(request.url):
+            return
+        self.emit_event(
+            EV.Source.PLAYWRIGHT,
+            EV.EventType.HTTP_FAILED,
+            frame_id=_frame_id(request),
+            method=request.method.upper(),
+            url=request.url,
+            resource_type=request.resource_type,
+            failure=request.failure,
+        )
+
+    async def handle_frame_navigated(self, frame):
+        if not self.scope.contains(frame.url):
+            return
+        self.emit_event(
+            EV.Source.PLAYWRIGHT,
+            EV.EventType.FRAME_NAVIGATED,
+            frame_id=_frame_id_of(frame),
+            url=frame.url,
+            is_main_frame=frame.parent_frame is None,
+        )
 
     # ==========================================
     # DATA CORRELATION & OPENAPI
@@ -573,7 +823,10 @@ class WebHarvester:
         elif isinstance(data, (str, int)) and not isinstance(data, bool):
             val = str(data)
             if 3 <= len(val) <= 120:
-                h = hashlib.sha1(val.encode("utf-8", errors="ignore")).hexdigest()
+                # Index key for value-propagation lookup, not a security primitive.
+                h = hashlib.sha1(  # noqa: S324
+                    val.encode("utf-8", errors="ignore"), usedforsecurity=False
+                ).hexdigest()
                 self.value_origins[h] = {"origin_endpoint": f"{method} {path}", "field": prefix}
 
     def _correlate_dependencies(self, data, method, path, prefix=""):
@@ -584,7 +837,10 @@ class WebHarvester:
             for i, v in enumerate(data[:10]): 
                 self._correlate_dependencies(v, method, path, f"{prefix}[{i}]")
         elif isinstance(data, (str, int)) and not isinstance(data, bool):
-            h = hashlib.sha1(str(data).encode("utf-8", errors="ignore")).hexdigest()
+            # Must match the digest used by _map_response_tokens.
+            h = hashlib.sha1(  # noqa: S324
+                str(data).encode("utf-8", errors="ignore"), usedforsecurity=False
+            ).hexdigest()
             origin = self.value_origins.get(h)
             if origin:
                 link = {"source": origin, "consumer": {"endpoint": f"{method} {path}", "field": prefix}}
@@ -637,13 +893,29 @@ class WebHarvester:
         for frame in page.frames:
             # A frame may be third-party even when the top document is in scope.
             if not self.scope.contains(frame.url):
+                self.emit_capture_gap(
+                    "frame_out_of_scope",
+                    host=urlparse(frame.url).hostname,
+                    frame_id=_frame_id_of(frame),
+                )
                 continue
             try:
                 dom = await frame.evaluate(DOM_PROBE_JS)
                 results.append({"frame_url": frame.url, "data": dom})
-            except Exception:
-                pass
+            except Exception as exc:
+                # A frame we could not read is a hole, not an empty frame.
+                self.emit_sensor_error(
+                    "scan_all_frames", exc, frame_id=_frame_id_of(frame), url=frame.url)
+
         self.dom_snapshots.append({"time": datetime.now().isoformat(), "frames": results})
+        self.emit_event(
+            EV.Source.ENGINE,
+            EV.EventType.DOM_SNAPSHOT,
+            url=page.url,
+            frames_captured=len(results),
+            frames_total=len(page.frames),
+            forms=sum(len(r["data"].get("forms", [])) for r in results),
+        )
 
     async def extract_active_introspection(self, page):
         """Pulls Hooks, Dropdowns, and jQuery events before closing."""
@@ -677,6 +949,33 @@ class WebHarvester:
 
         self.js_hooks = await page.evaluate("window.functionHookLogs || []")
         self.mutations = await page.evaluate("window.domMutations || []")
+
+        self.emit_event(
+            EV.Source.RUNTIME,
+            EV.EventType.RUNTIME_HOOKS,
+            url=page.url,
+            hook_calls=len(self.js_hooks),
+            functions=sorted({h.get("function") for h in self.js_hooks if h.get("function")}),
+            dropdown_catalogs=sorted(self.catalogs),
+            jquery_bound_selectors=sorted(self.jquery_events),
+        )
+        self.emit_event(
+            EV.Source.RUNTIME,
+            EV.EventType.DOM_MUTATION,
+            url=page.url,
+            mutation_count=len(self.mutations),
+            mutation_types=sorted({m.get("type") for m in self.mutations if m.get("type")}),
+        )
+        # These buffers live in page memory and are read only here, so every full
+        # navigation before this point discarded them. Record that limitation in
+        # the evidence rather than presenting the tail as the whole session.
+        self.emit_capture_gap(
+            "runtime_buffers_read_once_at_exit",
+            note=(
+                "window.functionHookLogs / window.domMutations are wiped by every "
+                "full page navigation; only the final document's buffers are here"
+            ),
+        )
 
     def generate_httpx_code(self) -> str:
         """Generate an API client that contains NO captured credentials.
@@ -760,16 +1059,36 @@ def _auth_headers() -> dict:
                 and not is_sensitive_header(k)
             }
 
+            # A GET form submission puts every field in the query string, so the
+            # captured URL can carry passwords, CSRF tokens and personal data.
+            # Emit the endpoint, never the captured values: keep scheme/host/path
+            # and document the parameter NAMES so the caller knows what to pass.
+            endpoint_url, param_names, sensitive_params = _split_captured_url(meta["url"])
+            observed_credential_headers.update(sensitive_params)
+
+            param_doc = ""
+            if param_names:
+                param_doc = (
+                    f"\n\n    Observed query parameters (names only, values not retained):"
+                    f"\n        {', '.join(param_names)}"
+                )
+                if sensitive_params:
+                    param_doc += (
+                        f"\n    Credential-shaped, must be supplied by the caller:"
+                        f"\n        {', '.join(sensitive_params)}"
+                    )
+
             fn = f'''
-async def {fn_name}(payload: dict = None, custom_headers: dict = None):
-    """{method} {path}  ·  observed statuses: {sorted(meta["statuses"]) or "none"}"""
-    url = "{meta['url']}"
+async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: dict = None):
+    """{method} {path}  ·  observed statuses: {sorted(meta["statuses"]) or "none"}{param_doc}
+    """
+    url = "{endpoint_url}"
     headers = {json.dumps(safe_headers, indent=4)}
     headers.update(_auth_headers())
     if custom_headers:
         headers.update(custom_headers)
     async with httpx.AsyncClient(verify=_verify()) as client:
-        res = await client.{method.lower()}(url, headers=headers, json=payload)
+        res = await client.{method.lower()}(url, headers=headers, params=params, json=payload)
         return res.json() if "application/json" in res.headers.get("content-type", "") else res.text
 '''
             code_blocks.append(fn.strip() + "\n")
@@ -801,9 +1120,10 @@ async def {fn_name}(payload: dict = None, custom_headers: dict = None):
 
         return {
             "schema": "scriptscrap/session-manifest/1",
+            "session_id": self.session_id,
             "target_url": self.target_url,
             "started_at": self.started_at.isoformat(),
-            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": datetime.now(UTC).isoformat(),
             "scope": self.scope.as_dict(),
             "environment": {
                 "python": sys.version.split()[0],
@@ -838,8 +1158,10 @@ async def {fn_name}(payload: dict = None, custom_headers: dict = None):
                 "WebSocket frames are not subscribed to (Playwright supports them on Firefox).",
                 "Server-Sent Events yield no incremental frames.",
                 "Request initiators and JS call stacks are not captured.",
-                "In-page hook and DOM-mutation buffers are read only at exit and "
-                "are destroyed by every full page navigation.",
+                "In-page hook buffers, DOM mutations, dropdown catalogs and jQuery "
+                "events are read once at exit, from the top frame only, and are "
+                "destroyed by every full page navigation. Only the final document "
+                "is represented.",
                 "JS function hooks run on a 2s interval and miss calls made during "
                 "initial page parse.",
                 "NOISY_ENDPOINTS drops matching URLs at capture time; they are not "
@@ -857,6 +1179,18 @@ async def {fn_name}(payload: dict = None, custom_headers: dict = None):
                 "visual_captures_skipped_out_of_scope": self.skipped_visual_captures,
                 "dependency_edges": len(self.value_dependencies),
             },
+            "event_spine": {
+                "mode": "dual_write",
+                "available": EVENTS_AVAILABLE,
+                "log": "events.jsonl" if self.event_log is not None else None,
+                "events_emitted": self.event_log.count if self.event_log is not None else 0,
+                "note": (
+                    "Events are written alongside the outputs above, incrementally, "
+                    "so an interrupted session still leaves a readable history. The "
+                    "structures in this manifest remain the behavioural authority; "
+                    "nothing reads the event log to produce them yet."
+                ),
+            },
             "snapshot_fidelity": {
                 **self.snapshot_stats,
                 "note": (
@@ -871,6 +1205,11 @@ async def {fn_name}(payload: dict = None, custom_headers: dict = None):
         }
 
     def export(self):
+        # export() runs from a finally block and from non-interactive callers
+        # (the golden-master harness), so the console-encoding guard has to be
+        # here rather than only in main(). Idempotent.
+        _configure_stdout()
+
         (OUTPUT_DIR / "network_traffic.json").write_text(json.dumps(self.network_log, indent=2, ensure_ascii=False), encoding="utf-8")
         (OUTPUT_DIR / "dom_structure.json").write_text(json.dumps(self.dom_snapshots, indent=2, ensure_ascii=False), encoding="utf-8")
         (OUTPUT_DIR / "api_dependencies.json").write_text(json.dumps(self.value_dependencies, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -903,12 +1242,39 @@ async def {fn_name}(payload: dict = None, custom_headers: dict = None):
 
         (OUTPUT_DIR / "SECURITY.md").write_text(SECURITY_NOTICE, encoding="utf-8")
 
+        # Close the event spine last: it records the session end.
+        self.close_events()
+
         written = sorted(p.name for p in OUTPUT_DIR.glob("*.*"))
         print(f"\n🏆 Exported {len(written)} files + visual traces to ./{OUTPUT_DIR.name}/")
         print(f"   In-scope endpoints: {len(self.endpoints)} | "
               f"out-of-scope (metadata only): {len(self.out_of_scope)}")
         print("   ⚠  This directory contains unredacted authenticated capture. "
               "It is gitignored. Do not share it.")
+
+async def attach_engine_to_page(page, engine):
+    """Wire an engine to a page.
+
+    Extracted so the interactive entry point and the golden-master harness use
+    exactly the same wiring. If these drift apart, the baseline stops describing
+    what the tool actually does.
+    """
+    # Early hooks and observers, before any page script runs.
+    await page.add_init_script(HOOK_AND_OBSERVER_JS)
+
+    await page.route("**/*", engine.route_filter)
+    page.on("request", engine.handle_request)
+    page.on("response", engine.handle_response)
+    page.on("requestfailed", engine.handle_request_failed)
+    page.on("framenavigated", engine.handle_frame_navigated)
+
+    engine.emit_event(
+        EV.Source.ENGINE,
+        EV.EventType.PAGE_OPENED,
+        url=page.url,
+        target=engine.target_url,
+    )
+
 
 async def background_dom_scanner(page, engine):
     last_hash = ""
@@ -917,13 +1283,20 @@ async def background_dom_scanner(page, engine):
         await asyncio.sleep(2.0)
         try:
             content = await page.content()
-            curr_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+            # Change-detection only. Not a security primitive.
+            curr_hash = hashlib.md5(  # noqa: S324
+                content.encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
             if curr_hash != last_hash:
                 last_hash = curr_hash
                 await engine.scan_all_frames(page)
                 await engine.capture_visual_state(page)
-        except Exception:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The scanner is the only thing driving periodic capture. If it keeps
+            # failing, the session looks quiet when it is actually unobserved.
+            engine.emit_sensor_error("background_dom_scanner", exc)
 
 def _configure_stdout():
     """Keep the emoji status output from killing the run on a cp1252 console.
@@ -937,17 +1310,16 @@ def _configure_stdout():
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
-        try:
+        with contextlib.suppress(Exception):
             reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
 
 
 async def main():
     _configure_stdout()
 
     target_url = input("Enter Target Portal URL: ").strip()
-    if not target_url.startswith("http"): target_url = "https://" + target_url
+    if not target_url.startswith("http"):
+        target_url = "https://" + target_url
 
     scope = prompt_for_scope(target_url)
     engine = WebHarvester(target_url, scope)
@@ -969,13 +1341,8 @@ async def main():
     try:
         async with AsyncCamoufox(**launch_options) as browser:
             page = await browser.new_page(locale="fr-FR", timezone_id="Europe/Paris")
-            
-            # Add early Hooks and Observers
-            await page.add_init_script(HOOK_AND_OBSERVER_JS)
-            
-            await page.route("**/*", engine.route_filter)
-            page.on("request", engine.handle_request)
-            page.on("response", engine.handle_response)
+
+            await attach_engine_to_page(page, engine)
 
             print(f"🚀 Infiltrating {target_url}...")
             await page.goto(target_url, wait_until="load")

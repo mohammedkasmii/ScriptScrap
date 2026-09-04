@@ -122,8 +122,10 @@ def check_gitignore() -> None:
     ]
     leaks = []
     for sample in samples:
-        proc = subprocess.run(
-            ["git", "check-ignore", "-q", "--", sample],
+        # Fixed argument list; `sample` comes from the literal list above, never
+        # from user input. `git` is resolved from PATH by design.
+        proc = subprocess.run(  # noqa: S603
+            ["git", "check-ignore", "-q", "--", sample],  # noqa: S607
             cwd=REPO, capture_output=True, check=False,
         )
         if proc.returncode != 0:

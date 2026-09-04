@@ -1,49 +1,52 @@
 @echo off
-TITLE Debug Runner
+TITLE ScriptScrap Debug Runner
 color 0b
 
-echo Testing Python availability...
-python --version
-if %ERRORLEVEL% NEQ 0 (
-    echo [CRITICAL ERROR] Python is NOT recognized in this terminal!
+REM ---------------------------------------------------------------------------
+REM Diagnostic runner. Runs every compatibility probe and the test suite, then
+REM stops. Use this when something looks wrong, or after upgrading a dependency.
+REM ---------------------------------------------------------------------------
+
+cd /d "%~dp0.."
+
+echo === uv ===
+where uv >nul 2>&1
+if errorlevel 1 (
+    echo [CRITICAL] uv is not on PATH. See README.md.
     goto END
 )
+uv --version
 
 echo.
-echo Activating or creating venv...
-if not exist "venv\" (
-    echo Creating new virtual environment...
-    python -m venv venv
-)
-call venv\Scripts\activate
+echo === Syncing locked environment ===
+uv sync --all-groups
 
 echo.
-echo Upgrading pip...
-python -m pip install --upgrade pip
+echo === Environment doctor (offline) ===
+uv run python diagnostics\check_environment.py
 
 echo.
-echo Installing requirements...
-pip install camoufox httpx playwright
+echo === Offline tests (no browser) ===
+uv run pytest -m "not browser" -q
 
 echo.
-echo Fetching Camoufox browser...
-python -m camoufox fetch
+echo === Compatibility probes (launch Camoufox) ===
+echo --- snapshot integrity (F-03) ---
+uv run python diagnostics\probes\snapshot_integrity_probe.py
+echo --- hook timing / JS world ---
+uv run python diagnostics\probes\hook_timing_probe.py
+echo --- JS world (file://) ---
+uv run python diagnostics\probes\js_world_probe.py
+echo --- uBlock default addon (needs network) ---
+uv run python diagnostics\probes\addon_filter_probe.py
 
 echo.
-echo Installing Windows browser dependencies...
-playwright install-deps
-
-echo.
-echo Launching script...
-if not exist "camoufox_investigator.py" (
-    echo [ERROR] camoufox_investigator.py not found in this folder!
-    goto END
-)
-python camoufox_investigator.py
+echo === Full test suite incl. golden master ===
+uv run pytest -q
 
 :END
 echo.
 echo ========================================================
-echo Script finished or crashed. Read the messages above.
+echo Diagnostics finished. Read the messages above.
 echo ========================================================
 pause
