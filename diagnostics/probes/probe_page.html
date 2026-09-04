@@ -1,0 +1,30 @@
+<!doctype html>
+<!--
+  Fixture page for js_world_probe.py.
+
+  Its inline script runs in the page's REAL main world and reports what it can
+  see, by writing into document.title. Because the title is DOM state rather
+  than a JS global, the probe can read it back regardless of which JS world
+  page.evaluate happens to run in -- which is exactly the thing under test.
+-->
+<html><head><title>pending</title></head>
+<body>
+<div id="out">pending</div>
+<script>
+window.__pageWorld = "PAGE_MARKER";
+window.pageFn = function (a, b) { return a + b; };
+
+var seen = {
+  initMarkerVisibleToPage: (typeof window.__initWorld !== "undefined")
+      ? window.__initWorld : "ABSENT",
+  fetchIsPatchedFromPageView: (window.fetch && window.fetch.__patchedByInit === true)
+      ? "PATCHED" : "NATIVE",
+  fetchToString: String(window.fetch).slice(0, 60)
+};
+document.getElementById("out").textContent = JSON.stringify(seen);
+document.title = JSON.stringify(seen);
+
+// Call pageFn immediately so a hook that landed late records nothing.
+window.__pageFnResult = window.pageFn(2, 3);
+</script>
+</body></html>

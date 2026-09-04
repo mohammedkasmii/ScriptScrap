@@ -22,8 +22,24 @@ temp/
 .DS_Store
 Thumbs.db
 
+# ---------------------------------------------------------------------------
 # Investigation dumps, traces & screenshots
-v12_camoufox_output/
+#
+# These directories contain UNREDACTED captures of authenticated sessions:
+# Authorization/Cookie headers, request & response bodies, full-page HTML,
+# screenshots and generated API clients. They must never be committed.
+#
+# Patterns are deliberately NAME-INDEPENDENT. A previous version of this file
+# ignored only "v12_camoufox_output/" while the investigator wrote to
+# "v13_investigation_output/", which left every capture git-trackable.
+# Do not replace these with another hardcoded version number.
+# ---------------------------------------------------------------------------
+*_output/
+*investigation*output*/
+*camoufox_output*/
+*scraped_output*/
+sessions/
+visual_traces/
 script spy/
 script\ spy/
 
