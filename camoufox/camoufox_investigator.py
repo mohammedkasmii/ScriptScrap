@@ -25,12 +25,15 @@ from camoufox.async_api import AsyncCamoufox
 # package installed. The supported path is `uv run`.
 # ---------------------------------------------------------------------------
 EV: Any
+SENSORS: Any
 try:
     from scriptscrap import events as EV
+    from scriptscrap import sensors as SENSORS
 
     EVENTS_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only in a bare venv
     EV = None
+    SENSORS = None
     EVENTS_AVAILABLE = False
 
 OUTPUT_DIR = Path("v13_investigation_output")
@@ -474,6 +477,16 @@ class WebHarvester:
             "failures": 0,
             "last_error": None,
         }
+
+        # --- observation sensors (M2) --------------------------------------
+        # Stable page/frame identity plus the sensors that cover what the
+        # network+DOM capture above cannot see.
+        self.registry = SENSORS.PageRegistry() if EVENTS_AVAILABLE else None
+        self.lifecycle_sensor = None
+        self.runtime_sensor = None
+        self.websocket_sensor = None
+        self.storage_sensor = None
+        self.graphql_operations = {}
         self.launch_options_record = {}
         self.started_at = datetime.now(UTC)
 
@@ -536,6 +549,12 @@ class WebHarvester:
     # ==========================================
     # SCOPE ENFORCEMENT
     # ==========================================
+    def _frame_of(self, request):
+        """Stable frame id for a request, via the registry when available."""
+        if self.registry is not None:
+            return self.registry.frame_of_request(request)
+        return _frame_id(request)
+
     def _record_out_of_scope(self, method: str, url: str, status: int | None = None):
         """Retain that a request happened, and nothing that could be sensitive.
 
@@ -558,6 +577,16 @@ class WebHarvester:
             entry["statuses"].add(status)
 
     async def route_filter(self, route):
+        """Media-blocking route handler. NOT installed by default any more.
+
+        Retained so the behaviour can be re-enabled deliberately, but blanket
+        `page.route("**/*")` is no longer used: routing every request through
+        Python disables the HTTP cache for routed requests and adds a round trip
+        to each one, which changes both timing and cache behaviour. That is a
+        large distortion to pay for aborting five media extensions.
+
+        Prefer observing everything. Noise classification belongs to analysis.
+        """
         url = route.request.url.lower()
         parsed = urlparse(url)
         if any(parsed.path.endswith(ext) for ext in STATIC_MEDIA_EXTENSIONS):
@@ -706,10 +735,21 @@ class WebHarvester:
 
             self._build_openapi_request(method, url_path, parsed_json or post_data)
 
+            # GraphQL collapses an entire API onto one URL, so the operation --
+            # not the path -- is the endpoint identity worth recording.
+            graphql = None
+            if EVENTS_AVAILABLE:
+                graphql = SENSORS.describe_graphql(url, parsed_json)
+                if graphql:
+                    label = SENSORS.operation_label(graphql)
+                    if label:
+                        self.graphql_operations.setdefault(url_path, set()).add(label)
+                        print(f"[GQL ->] {label}")
+
             self.emit_event(
                 EV.Source.PLAYWRIGHT,
                 EV.EventType.HTTP_REQUEST,
-                frame_id=_frame_id(request),
+                frame_id=self._frame_of(request),
                 method=method,
                 url=url,
                 path=url_path,
@@ -719,6 +759,7 @@ class WebHarvester:
                 credential_header_names=sorted(h for h in headers if is_sensitive_header(h)),
                 body=parsed_json if parsed_json is not None else post_data,
                 body_present=post_data is not None,
+                graphql=graphql,
             )
 
     async def handle_response(self, response):
@@ -770,7 +811,7 @@ class WebHarvester:
             self.emit_event(
                 EV.Source.PLAYWRIGHT,
                 EV.EventType.HTTP_RESPONSE,
-                frame_id=_frame_id(req),
+                frame_id=self._frame_of(req),
                 method=req.method.upper(),
                 url=req.url,
                 path=url_path,
@@ -792,7 +833,7 @@ class WebHarvester:
         self.emit_event(
             EV.Source.PLAYWRIGHT,
             EV.EventType.HTTP_FAILED,
-            frame_id=_frame_id(request),
+            frame_id=self._frame_of(request),
             method=request.method.upper(),
             url=request.url,
             resource_type=request.resource_type,
@@ -919,6 +960,13 @@ class WebHarvester:
 
     async def extract_active_introspection(self, page):
         """Pulls Hooks, Dropdowns, and jQuery events before closing."""
+        # Drain anything the probe still holds, and take a final state snapshot,
+        # before the page is torn down.
+        if self.runtime_sensor is not None:
+            await self.runtime_sensor.drain(page)
+        if self.storage_sensor is not None:
+            await self.storage_sensor.snapshot(page, reason="session_end")
+
         print("\n[*] Dumping Dropdown Catalogs & jQuery Events...")
         
         self.catalogs = await page.evaluate("""() => {
@@ -958,13 +1006,13 @@ class WebHarvester:
             functions=sorted({h.get("function") for h in self.js_hooks if h.get("function")}),
             dropdown_catalogs=sorted(self.catalogs),
             jquery_bound_selectors=sorted(self.jquery_events),
-        )
-        self.emit_event(
-            EV.Source.RUNTIME,
-            EV.EventType.DOM_MUTATION,
-            url=page.url,
-            mutation_count=len(self.mutations),
-            mutation_types=sorted({m.get("type") for m in self.mutations if m.get("type")}),
+            # The legacy MutationObserver's tail, summarised. Incremental
+            # mutations now come from the runtime probe as dom_mutation events;
+            # this stays folded in here so the two are never confused.
+            legacy_mutation_count=len(self.mutations),
+            legacy_mutation_types=sorted(
+                {m.get("type") for m in self.mutations if m.get("type")}
+            ),
         )
         # These buffers live in page memory and are read only here, so every full
         # navigation before this point discarded them. Record that limitation in
@@ -1148,27 +1196,49 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
             "capture_policy": {
                 "resource_types_captured": list(CAPTURED_RESOURCE_TYPES),
                 "methods_excluded": ["OPTIONS"],
-                "media_extensions_aborted": sorted(STATIC_MEDIA_EXTENSIONS),
+                "request_routing_active": False,
+                "media_extensions_aborted": [],
+                "routing_note": (
+                    "blanket page.route('**/*') is NOT installed: it disables the "
+                    "HTTP cache for routed requests and taxes every request, which "
+                    "distorts both timing and caching. No media is blocked."
+                ),
                 "url_substrings_dropped_at_capture": sorted(NOISY_ENDPOINTS),
                 "response_samples_per_endpoint": 2,
                 "request_samples_per_endpoint": 2,
+                "listeners_attached_at": "browser_context",
+            },
+            "sensors": {
+                "lifecycle": self.lifecycle_sensor.stats() if self.lifecycle_sensor else None,
+                "runtime": self.runtime_sensor.stats() if self.runtime_sensor else None,
+                "websocket": self.websocket_sensor.stats() if self.websocket_sensor else None,
+                "storage": self.storage_sensor.stats() if self.storage_sensor else None,
+                "identity": self.registry.snapshot() if self.registry else None,
+            },
+            "graphql_operations": {
+                path: sorted(ops) for path, ops in sorted(self.graphql_operations.items())
             },
             "known_blind_spots": [
-                "Service-worker traffic is invisible to Playwright on Firefox.",
-                "WebSocket frames are not subscribed to (Playwright supports them on Firefox).",
-                "Server-Sent Events yield no incremental frames.",
-                "Request initiators and JS call stacks are not captured.",
-                "In-page hook buffers, DOM mutations, dropdown catalogs and jQuery "
-                "events are read once at exit, from the top frame only, and are "
-                "destroyed by every full page navigation. Only the final document "
-                "is represented.",
-                "JS function hooks run on a 2s interval and miss calls made during "
-                "initial page parse.",
+                "Service-worker traffic is invisible to Playwright on Firefox. When a "
+                "service worker is detected a capture_gap is emitted.",
+                "WebSocket handshake headers are not exposed by Playwright, so auth "
+                "sent on the upgrade is unobserved. Frames themselves ARE captured.",
+                "httpOnly cookie changes are only visible as periodic snapshots, not "
+                "as a change stream. IndexedDB and Cache Storage are not captured.",
+                "Legacy named-function hooks run on a 2s interval and miss calls made "
+                "during initial page parse. Proven unsolvable from injected JS; "
+                "source rewriting is a later, gated capability.",
+                "Dropdown catalogs and jQuery events are still read once at exit, from "
+                "the top frame only, and are destroyed by every full page navigation. "
+                "User actions, runtime calls and DOM mutations are NOT: those are "
+                "flushed before navigation by the runtime probe.",
                 "NOISY_ENDPOINTS drops matching URLs at capture time; they are not "
                 "recoverable from this session.",
                 "Response bodies are truncated to 2 samples per endpoint.",
                 "Endpoint identity ignores the query string and does not template "
                 "path parameters.",
+                "Runtime stacks are raw observation. No causal relationship between a "
+                "runtime call and a network request is asserted at capture time.",
             ],
             "counters": {
                 "endpoints_in_scope": len(self.endpoints),
@@ -1253,44 +1323,79 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
               "It is gitignored. Do not share it.")
 
 async def attach_engine_to_page(page, engine):
-    """Wire an engine to a page.
+    """Wire an engine and all observation sensors to a page and its context.
 
     Extracted so the interactive entry point and the golden-master harness use
     exactly the same wiring. If these drift apart, the baseline stops describing
     what the tool actually does.
+
+    Listeners go on the CONTEXT wherever Playwright allows, so a popup or a
+    window the application opens is observed on the same footing as this page.
     """
-    # Early hooks and observers, before any page script runs.
+    context = page.context
+
+    # Legacy named-function hooks. Their parse-time blind spot is documented in
+    # the session manifest and is deliberately NOT solved here; source rewriting
+    # is a later, gated capability.
     await page.add_init_script(HOOK_AND_OBSERVER_JS)
 
-    await page.route("**/*", engine.route_filter)
-    page.on("request", engine.handle_request)
-    page.on("response", engine.handle_response)
-    page.on("requestfailed", engine.handle_request_failed)
-    page.on("framenavigated", engine.handle_frame_navigated)
+    # Network capture stays on the engine: it also feeds the exporters that
+    # remain the behavioural authority.
+    context.on("request", engine.handle_request)
+    context.on("response", engine.handle_response)
+    context.on("requestfailed", engine.handle_request_failed)
 
-    engine.emit_event(
-        EV.Source.ENGINE,
-        EV.EventType.PAGE_OPENED,
-        url=page.url,
-        target=engine.target_url,
-    )
+    if EVENTS_AVAILABLE:
+        engine.lifecycle_sensor = SENSORS.LifecycleSensor(engine, engine.registry)
+        engine.runtime_sensor = SENSORS.RuntimeSensor(engine, engine.registry)
+        engine.websocket_sensor = SENSORS.WebSocketSensor(engine, engine.registry)
+        engine.storage_sensor = SENSORS.StorageSensor(engine, engine.registry)
+
+        # The probe must be installed before anything navigates, so it is
+        # present at document_start in every frame of every page.
+        await engine.runtime_sensor.attach(context)
+        await engine.lifecycle_sensor.attach(context)
+        engine.lifecycle_sensor.observe_page(page)
+        engine.websocket_sensor.attach_page(page)
+
+        # A page opened later needs its own WebSocket listener.
+        context.on("page", engine.websocket_sensor.attach_page)
+    else:
+        # Without the package the engine still works, but observes far less.
+        page.on("framenavigated", engine.handle_frame_navigated)
 
 
 async def background_dom_scanner(page, engine):
+    """Hybrid snapshot trigger: semantic where possible, polled as a safety net.
+
+    Full semantic triggering is a later step. What is added here is a URL check,
+    so a navigation is snapshotted on the next tick even when the new document
+    happens to hash close to the old one, and a storage snapshot alongside it so
+    state is captured at the boundary that actually changes it.
+
+    The 2s content poll remains because removing it would silently reduce
+    coverage on pages that mutate without navigating.
+    """
     last_hash = ""
+    last_url = None
     await engine.capture_visual_state(page)
     while True:
         await asyncio.sleep(2.0)
         try:
+            current_url = page.url
             content = await page.content()
             # Change-detection only. Not a security primitive.
             curr_hash = hashlib.md5(  # noqa: S324
                 content.encode("utf-8"), usedforsecurity=False
             ).hexdigest()
-            if curr_hash != last_hash:
+            navigated = current_url != last_url
+            if navigated or curr_hash != last_hash:
                 last_hash = curr_hash
+                last_url = current_url
                 await engine.scan_all_frames(page)
                 await engine.capture_visual_state(page)
+                if navigated and engine.storage_sensor is not None:
+                    await engine.storage_sensor.snapshot(page, reason="navigation")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

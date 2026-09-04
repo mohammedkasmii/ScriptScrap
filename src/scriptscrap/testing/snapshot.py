@@ -93,29 +93,57 @@ def _summarise_generated_client(path: Path) -> dict[str, Any]:
 #
 # Ordering is not left untested: the spine's `seq` is the authoritative total
 # order, and test_replay asserts a request precedes its own response.
-CONCURRENT_EVENT_TYPES = frozenset({"http_request", "http_response", "frame_navigated"})
+#
+# `dom_mutation` is here for a second reason: the probe emits it on a debounce
+# timer, so its position drifts even within its own source's stream. How many
+# mutation batches occurred stays pinned; where they land does not.
+CONCURRENT_EVENT_TYPES = frozenset(
+    {"http_request", "http_response", "frame_navigated", "dom_mutation"}
+)
 
 
 def _summarise_events(path: Path) -> dict[str, Any]:
     """Emission shape of the dual-written event spine."""
-    from scriptscrap.events import EventLogReader
+    from scriptscrap.events import EventLogReader, EventType
 
     reader = EventLogReader(path)
     by_type: dict[str, int] = {}
     for event in reader:
         by_type[str(event.type)] = by_type.get(str(event.type), 0) + 1
+
+    # How many BATCHES the mutation observer's debounce produced is a timing
+    # artifact -- the same mutations coalesce into 6 or 7 events depending on
+    # machine load. How many MUTATIONS were observed is behaviour, so that is
+    # what gets pinned.
+    mutation_events = reader.of_type(EventType.DOM_MUTATION)
+    if mutation_events:
+        by_type["dom_mutation"] = "<BATCHED>"  # type: ignore[assignment]
+
     return {
         "problems": [str(p) for p in reader.validate()],
         "by_type": dict(sorted(by_type.items())),
+        "dom_mutations_observed": sum(
+            e.payload.get("count", 0) for e in mutation_events
+        ),
         "by_source": {
+            # Same reason: a source whose events are timer-batched has a
+            # load-dependent event count. Counts are pinned per type above.
             src: sum(1 for e in reader if str(e.source) == src)
             for src in sorted({str(e.source) for e in reader})
+            if src != "runtime"
         },
-        # The scripted workflow drives these sequentially, so their order IS
-        # deterministic and a change to it is a real behavioural change.
-        "lifecycle_order": [
-            str(e.type) for e in reader if str(e.type) not in CONCURRENT_EVENT_TYPES
-        ],
+        # Ordering is pinned PER SOURCE, not globally. Each sensor delivers over
+        # its own channel -- the runtime probe batches over an IPC binding while
+        # Playwright events arrive from the driver -- so the interleaving between
+        # sources is a race, but the order within one source is deterministic and
+        # a change to it is a real behavioural change.
+        "lifecycle_order_by_source": {
+            src: [
+                str(e.type) for e in reader
+                if str(e.source) == src and str(e.type) not in CONCURRENT_EVENT_TYPES
+            ]
+            for src in sorted({str(e.source) for e in reader})
+        },
         "seq_is_dense": reader.sequence_gaps() == [],
         "first_type": str(reader.events[0].type) if reader.events else None,
         "last_type": str(reader.events[-1].type) if reader.events else None,

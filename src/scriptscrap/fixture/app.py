@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
@@ -62,6 +63,46 @@ def _html(markup: str, status: int = 200) -> _Response:
 _NOT_FOUND_HTML_RESPONSE = _html(content.NOT_FOUND_HTML, 404)
 _NOT_FOUND_JSON_RESPONSE = _json(content.NOT_FOUND_JSON, 404)
 
+# Marker: this route streams and therefore cannot go through the normal
+# fixed-Content-Length emitter.
+_SSE_SENTINEL = _Response(-1, "text/event-stream", b"")
+
+# A fixed SSE script. Deterministic content; only the small inter-event delay
+# is timing-related, and it exists so the stream is genuinely incremental
+# rather than one buffered write.
+SSE_SCRIPT: tuple[tuple[str | None, str], ...] = (
+    (None, "fixture-sse-1"),
+    ("progression", '{"pct": 50}'),
+    (None, "fixture-sse-2"),
+    ("progression", '{"pct": 100}'),
+    ("fin", "fixture-sse-complete"),
+)
+
+
+def _graphql_payload(body: str | None) -> dict[str, Any]:
+    """Answer a GraphQL operation by name. Fixed responses, no schema."""
+    operation = None
+    variables: dict[str, Any] = {}
+    if body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                operation = parsed.get("operationName")
+                if isinstance(parsed.get("variables"), dict):
+                    variables = parsed["variables"]
+        except ValueError:
+            pass
+    if operation == "ValiderItem":
+        return {
+            "data": {
+                "validerItem": {
+                    "id": variables.get("id", "ITEM-0001"),
+                    "statut": "VALIDE",
+                }
+            }
+        }
+    return {"errors": [{"message": "unknown operation", "operation": operation}]}
+
 
 class _FixtureHandler(BaseHTTPRequestHandler):
     """Shared plumbing: recording, fixed headers, deterministic framing."""
@@ -95,6 +136,9 @@ class _FixtureHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length).decode("utf-8", errors="replace")
 
     def _emit(self, response: _Response) -> None:
+        if response.status == -1:
+            self._emit_sse()
+            return
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
@@ -104,6 +148,33 @@ class _FixtureHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if response.body:
             self.wfile.write(response.body)
+
+    def _emit_sse(self) -> None:
+        """Stream a fixed sequence of Server-Sent Events.
+
+        No Content-Length: the response is chunked-in-spirit and stays open
+        until the script finishes, which is what makes the messages genuinely
+        incremental rather than one buffered write.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header(content.FIXTURE_VERSION_HEADER, content.FIXTURE_VERSION_VALUE)
+        self.end_headers()
+        try:
+            for index, (name, data) in enumerate(SSE_SCRIPT, start=1):
+                chunk = f"id: {index}\n"
+                if name:
+                    chunk += f"event: {name}\n"
+                chunk += f"data: {data}\n\n"
+                self.wfile.write(chunk.encode("utf-8"))
+                self.wfile.flush()
+                time.sleep(0.05)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        finally:
+            self.close_connection = True
 
     def _handle(self, method: str) -> None:
         parts = urlsplit(self.path)
@@ -153,6 +224,17 @@ class _MainHandler(_FixtureHandler):
             )
         if path == "/api/redirect":
             return _Response(302, CT_JSON, b"", (("Location", "/api/redirected"),))
+        if path == "/api/telecharger":
+            # An attachment response, so the browser raises a download rather
+            # than navigating.
+            return _Response(
+                200,
+                "text/plain; charset=utf-8",
+                b"fixture download body\n",
+                (("Content-Disposition", 'attachment; filename="fixture-rapport.txt"'),),
+            )
+        if path == "/api/sse":
+            return _SSE_SENTINEL
         if path.startswith("/api/"):
             return _NOT_FOUND_JSON_RESPONSE
         return _NOT_FOUND_HTML_RESPONSE
@@ -164,6 +246,10 @@ class _MainHandler(_FixtureHandler):
         if path == "/api/form":
             received = dict(parse_qsl(body or "", keep_blank_values=True))
             return _json(json.dumps({"status": "ok", "received": received}))
+        if path == "/api/graphql":
+            return _json(json.dumps(_graphql_payload(body)))
+        if path == "/api/beacon":
+            return _Response(204, CT_JSON, b"")
         return _NOT_FOUND_JSON_RESPONSE
 
 
@@ -242,6 +328,8 @@ class FixtureServer:
     _cross: _FixtureHTTPServer | None = field(default=None, repr=False)
     _threads: list[threading.Thread] = field(default_factory=list, repr=False)
     _main_page_html: str = field(default="", repr=False)
+    _ws: Any = field(default=None, repr=False)
+    _dead_url: str = field(default="", repr=False)
 
     # -- lifecycle --------------------------------------------------------- #
     def start(self) -> FixtureServer:
@@ -249,9 +337,16 @@ class FixtureServer:
         if self._main is not None:
             return self
 
+        from .wsserver import WebSocketEchoServer, reserve_dead_port
+
         self._main = _FixtureHTTPServer((_HOST, 0), _MainHandler, self)
         self._cross = _FixtureHTTPServer((_HOST, 0), _CrossOriginHandler, self)
-        self._main_page_html = content.render_main_page(self.cross_origin_url)
+        self._ws = WebSocketEchoServer()
+        self._ws.start()
+        self._dead_url = f"http://{_HOST}:{reserve_dead_port()}/jamais"
+        self._main_page_html = content.render_main_page(
+            self.cross_origin_url, self._ws.url, self._dead_url
+        )
 
         for server in (self._main, self._cross):
             thread = threading.Thread(
@@ -269,12 +364,26 @@ class FixtureServer:
             if server is not None:
                 server.shutdown()
                 server.server_close()
+        if self._ws is not None:
+            self._ws.stop()
+            self._ws = None
         for thread in self._threads:
             thread.join(timeout=5.0)
         self._threads.clear()
         self._main = None
         self._cross = None
         self._main_page_html = ""
+
+    @property
+    def websocket_url(self) -> str:
+        if self._ws is None:
+            raise RuntimeError("websocket_url is only available while the fixture is running")
+        return self._ws.url
+
+    @property
+    def dead_url(self) -> str:
+        """An in-scope loopback URL with nothing listening, for failure cases."""
+        return self._dead_url
 
     def __enter__(self) -> FixtureServer:
         return self.start()

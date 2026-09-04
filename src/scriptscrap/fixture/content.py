@@ -11,6 +11,8 @@ render time (the port is OS-assigned, so it cannot be a literal).
 from __future__ import annotations
 
 CROSS_ORIGIN_PLACEHOLDER = "__CROSS_ORIGIN__"
+WEBSOCKET_PLACEHOLDER = "__WEBSOCKET_URL__"
+DEAD_URL_PLACEHOLDER = "__DEAD_URL__"
 
 # --------------------------------------------------------------------------- #
 # Fixed identifiers. These are deliberately credential-shaped but entirely
@@ -419,10 +421,132 @@ window.recalculerFixture = recalculerFixture;
     byId("btn-ajouter").addEventListener("click", ajouterChamp);
     byId("btn-calculer").addEventListener("click", calculer);
 
+    // --- M2 sensor exercises ------------------------------------------
+    byId("btn-graphql").addEventListener("click", envoyerGraphQL);
+    byId("btn-ws").addEventListener("click", ouvrirWebSocket);
+    byId("btn-sse").addEventListener("click", ouvrirSSE);
+    byId("btn-console").addEventListener("click", ecrireConsole);
+    byId("btn-exception").addEventListener("click", declencherException);
+    byId("btn-requete-morte").addEventListener("click", requeteImpossible);
+    byId("btn-stockage").addEventListener("click", ecrireStockage);
+    byId("btn-beacon").addEventListener("click", envoyerBeacon);
+    byId("btn-popup").addEventListener("click", ouvrirPopup);
+    byId("btn-route").addEventListener("click", changerRoute);
+    byId("btn-telecharger").addEventListener("click", telecharger);
+
     attacherShadow();
     enregistrerHandlersJQuery();
     peuplerGarages();
     window.__fixtureReady = true;
+  }
+
+  /* ---------------------------------------------------------------- *
+   * M2 sensor exercises. Each one drives exactly one observation path.
+   * All values are fixed so two runs behave identically.
+   * ---------------------------------------------------------------- */
+
+  function envoyerGraphQL() {
+    // A named mutation with variables: the operation, not the URL, is the
+    // identity a GraphQL recogniser must retain.
+    return fetch("/api/graphql", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operationName: "ValiderItem",
+        query: "mutation ValiderItem($id: ID!, $note: String) " +
+               "{ validerItem(id: $id, note: $note) { id statut } }",
+        variables: { id: "ITEM-0001", note: "fixture" }
+      })
+    }).then(function (r) { return r.json(); })
+      .then(function (data) {
+        byId("resultat").textContent = "graphql:" + data.data.validerItem.statut;
+      });
+  }
+
+  function ouvrirWebSocket() {
+    var url = window.__fixtureWsUrl;
+    if (!url) return;
+    var socket = new WebSocket(url);
+    window.__fixtureSocket = socket;
+    socket.addEventListener("open", function () {
+      socket.send("fixture-ping");
+      socket.send(JSON.stringify({ type: "subscribe", channel: "items" }));
+    });
+    socket.addEventListener("message", function (ev) {
+      var el = byId("ws-log");
+      el.textContent = el.textContent + "[" + ev.data + "]";
+      if (String(ev.data).indexOf("fixture-done") !== -1) socket.close();
+    });
+  }
+
+  function ouvrirSSE() {
+    var source = new EventSource("/api/sse");
+    window.__fixtureSse = source;
+    source.addEventListener("message", function (ev) {
+      byId("sse-log").textContent += "[m:" + ev.data + "]";
+    });
+    source.addEventListener("progression", function (ev) {
+      byId("sse-log").textContent += "[p:" + ev.data + "]";
+    });
+    source.addEventListener("fin", function () {
+      byId("sse-log").textContent += "[fin]";
+      source.close();
+    });
+  }
+
+  function ecrireConsole() {
+    console.log("fixture log message");
+    console.info("fixture info message");
+    console.warn("fixture warn message");
+    console.error("fixture error message");
+  }
+
+  function declencherException() {
+    // Thrown asynchronously so it becomes an uncaught page error rather than
+    // an exception the click handler swallows.
+    setTimeout(function () {
+      throw new Error("fixture uncaught exception");
+    }, 0);
+  }
+
+  function requeteImpossible() {
+    // A high loopback port with nothing listening: same host, so the request
+    // stays in scope, and not a browser-blocked "bad port", so the request is
+    // actually attempted and fails at the network layer.
+    return fetch(window.__fixtureDeadUrl, { mode: "no-cors" })
+      .catch(function () { byId("resultat").textContent = "requete-echouee"; });
+  }
+
+  function ecrireStockage() {
+    window.localStorage.setItem("fixtureToken", "LOCAL-FIXTURE-0001");
+    window.localStorage.setItem("fixtureCounter", "42");
+    window.sessionStorage.setItem("fixtureSession", "SESSION-FIXTURE-0001");
+    window.localStorage.removeItem("fixtureCounter");
+  }
+
+  function envoyerBeacon() {
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/api/beacon", "fixture-beacon-payload");
+    }
+  }
+
+  function ouvrirPopup() {
+    window.__fixturePopup = window.open("/page2?popup=1", "fixturePopup");
+  }
+
+  function changerRoute() {
+    history.pushState({ etape: 2 }, "", "/#/etape/2");
+    history.replaceState({ etape: 3 }, "", "/#/etape/3");
+  }
+
+  function telecharger() {
+    // A real navigation to an attachment response, so Playwright raises a
+    // download event rather than a navigation.
+    var a = document.createElement("a");
+    a.href = "/api/telecharger";
+    a.download = "fixture-rapport.txt";
+    document.body.appendChild(a);
+    a.click();
   }
 
   if (document.readyState === "loading") {
@@ -497,6 +621,22 @@ MAIN_PAGE_HTML = """<!DOCTYPE html>
   <button type="button" id="btn-erreur">Erreur</button>
   <button type="button" id="btn-ajouter">Ajouter</button>
   <button type="button" id="btn-calculer">Calculer</button>
+  <button type="button" id="btn-graphql">GraphQL</button>
+  <button type="button" id="btn-ws">WebSocket</button>
+  <button type="button" id="btn-sse">SSE</button>
+  <button type="button" id="btn-console">Console</button>
+  <button type="button" id="btn-exception">Exception</button>
+  <button type="button" id="btn-requete-morte">Requete morte</button>
+  <button type="button" id="btn-stockage">Stockage</button>
+  <button type="button" id="btn-beacon">Beacon</button>
+  <button type="button" id="btn-popup">Popup</button>
+  <button type="button" id="btn-route">Route SPA</button>
+  <button type="button" id="btn-telecharger">Telecharger</button>
+</div>
+
+<div id="logs">
+  <span id="ws-log"></span>
+  <span id="sse-log"></span>
 </div>
 
 <div id="resultat"></div>
@@ -507,6 +647,10 @@ MAIN_PAGE_HTML = """<!DOCTYPE html>
 
 <iframe id="frame-outer" src="/frame/outer" width="420" height="220" title="frame externe"></iframe>
 
+<script>
+window.__fixtureWsUrl = "__WEBSOCKET_URL__";
+window.__fixtureDeadUrl = "__DEAD_URL__";
+</script>
 <script src="/assets/jquery-stub.js"></script>
 <script src="/assets/app.js"></script>
 </body>
@@ -596,6 +740,17 @@ NOT_FOUND_HTML = """<!DOCTYPE html>
 """
 
 
-def render_main_page(cross_origin_url: str) -> str:
-    """Return the main page with the cross-origin base URL substituted in."""
-    return MAIN_PAGE_HTML.replace(CROSS_ORIGIN_PLACEHOLDER, cross_origin_url)
+def render_main_page(
+    cross_origin_url: str, websocket_url: str = "", dead_url: str = ""
+) -> str:
+    """Return the main page with the per-run URLs substituted in.
+
+    These URLs are the only text in the page that varies between runs; their
+    ports are OS-assigned. Everything else is fixed.
+    """
+    return (
+        MAIN_PAGE_HTML
+        .replace(CROSS_ORIGIN_PLACEHOLDER, cross_origin_url)
+        .replace(WEBSOCKET_PLACEHOLDER, websocket_url)
+        .replace(DEAD_URL_PLACEHOLDER, dead_url)
+    )

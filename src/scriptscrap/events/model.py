@@ -40,24 +40,63 @@ class EventType(StrEnum):
     SESSION_START = "session_start"
     SESSION_END = "session_end"
 
-    # Page / navigation
+    # Page / frame / navigation
     PAGE_OPENED = "page_opened"
-    NAVIGATION = "navigation"
+    PAGE_CLOSED = "page_closed"
+    POPUP_OPENED = "popup_opened"
+    FRAME_ATTACHED = "frame_attached"
+    FRAME_DETACHED = "frame_detached"
     FRAME_NAVIGATED = "frame_navigated"
+    NAVIGATION_COMMITTED = "navigation_committed"
 
     # Network
     HTTP_REQUEST = "http_request"
     HTTP_RESPONSE = "http_response"
     HTTP_FAILED = "http_failed"
 
+    # WebSocket
+    WS_OPEN = "ws_open"
+    WS_FRAME_SENT = "ws_frame_sent"
+    WS_FRAME_RECEIVED = "ws_frame_received"
+    WS_CLOSE = "ws_close"
+    WS_ERROR = "ws_error"
+
+    # Server-Sent Events (runtime probe; Playwright gives no incremental frames)
+    SSE_OPEN = "sse_open"
+    SSE_MESSAGE = "sse_message"
+    SSE_ERROR = "sse_error"
+
+    # User actions (runtime probe)
+    USER_CLICK = "user_click"
+    USER_INPUT = "user_input"
+    USER_CHANGE = "user_change"
+    USER_SUBMIT = "user_submit"
+    USER_KEY = "user_key"
+
+    # Runtime APIs that trigger network activity (runtime probe)
+    RUNTIME_FETCH = "runtime_fetch"
+    RUNTIME_XHR = "runtime_xhr"
+    RUNTIME_BEACON = "runtime_beacon"
+    RUNTIME_FORM_SUBMIT = "runtime_form_submit"
+    RUNTIME_HISTORY = "runtime_history"
+
     # DOM / artifacts
     DOM_SNAPSHOT = "dom_snapshot"
+    DOM_MUTATION = "dom_mutation"
     SCREENSHOT = "screenshot"
     HTML_SNAPSHOT = "html_snapshot"
 
-    # Runtime
+    # Application diagnostics
+    CONSOLE_MESSAGE = "console_message"
+    PAGE_EXCEPTION = "page_exception"
+    DOWNLOAD = "download"
+
+    # State
+    STORAGE_SNAPSHOT = "storage_snapshot"
+    STORAGE_CHANGE = "storage_change"
+
+    # Legacy: the named-function hook dump read once at exit.
     RUNTIME_HOOKS = "runtime_hooks"
-    DOM_MUTATION = "dom_mutation"
 
     # Honesty about the limits of observation
     SENSOR_ERROR = "sensor_error"

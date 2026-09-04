@@ -44,6 +44,14 @@ def test_monotonic_clock_is_replaced_by_key():
     assert normalize({"t_mono": 88231.442}) == {"t_mono": "<MONO>"}
 
 
+def test_transport_metrics_are_normalised_but_event_counts_are_not():
+    """How many IPC batches carried the events is not behaviour; how many events is."""
+    assert normalize({"batches": 9, "events": 34}) == {
+        "batches": "<TRANSPORT>",
+        "events": 34,
+    }
+
+
 def test_behaviour_is_never_normalised_away():
     """The whole point: things that describe what happened must survive."""
     payload = {

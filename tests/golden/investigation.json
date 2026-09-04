@@ -757,47 +757,100 @@
   },
   "events.jsonl": {
     "by_source": {
-      "engine": 17,
-      "playwright": 26,
-      "runtime": 2
+      "engine": 18,
+      "playwright": 35
     },
     "by_type": {
-      "capture_gap": 4,
-      "dom_mutation": 1,
+      "capture_gap": 6,
+      "dom_mutation": "<BATCHED>",
       "dom_snapshot": 4,
+      "frame_attached": 2,
+      "frame_detached": 2,
       "frame_navigated": 4,
       "html_snapshot": 3,
       "http_request": 11,
       "http_response": 11,
+      "navigation_committed": 2,
+      "page_closed": 1,
       "page_opened": 1,
+      "runtime_fetch": 6,
       "runtime_hooks": 1,
       "screenshot": 3,
       "session_end": 1,
-      "session_start": 1
+      "session_start": 1,
+      "storage_snapshot": 1,
+      "user_change": 4,
+      "user_click": 10,
+      "user_input": 7,
+      "user_submit": 1
     },
+    "dom_mutations_observed": 15,
     "first_type": "session_start",
     "last_type": "session_end",
-    "lifecycle_order": [
-      "session_start",
-      "page_opened",
-      "dom_snapshot",
-      "screenshot",
-      "html_snapshot",
-      "capture_gap",
-      "dom_snapshot",
-      "capture_gap",
-      "dom_snapshot",
-      "screenshot",
-      "html_snapshot",
-      "capture_gap",
-      "dom_snapshot",
-      "screenshot",
-      "html_snapshot",
-      "runtime_hooks",
-      "dom_mutation",
-      "capture_gap",
-      "session_end"
-    ],
+    "lifecycle_order_by_source": {
+      "engine": [
+        "session_start",
+        "dom_snapshot",
+        "screenshot",
+        "html_snapshot",
+        "capture_gap",
+        "dom_snapshot",
+        "capture_gap",
+        "dom_snapshot",
+        "screenshot",
+        "html_snapshot",
+        "capture_gap",
+        "dom_snapshot",
+        "screenshot",
+        "html_snapshot",
+        "capture_gap",
+        "capture_gap",
+        "capture_gap",
+        "session_end"
+      ],
+      "playwright": [
+        "page_opened",
+        "navigation_committed",
+        "frame_attached",
+        "frame_attached",
+        "frame_detached",
+        "frame_detached",
+        "navigation_committed",
+        "storage_snapshot",
+        "page_closed"
+      ],
+      "runtime": [
+        "runtime_fetch",
+        "user_input",
+        "user_input",
+        "user_click",
+        "user_input",
+        "user_change",
+        "user_click",
+        "user_input",
+        "user_change",
+        "user_input",
+        "user_change",
+        "user_input",
+        "user_change",
+        "user_input",
+        "user_click",
+        "runtime_fetch",
+        "user_click",
+        "runtime_fetch",
+        "user_click",
+        "runtime_fetch",
+        "user_click",
+        "runtime_fetch",
+        "user_click",
+        "runtime_fetch",
+        "user_click",
+        "user_click",
+        "user_click",
+        "user_submit",
+        "runtime_hooks"
+      ]
+    },
     "problems": [],
     "seq_is_dense": true
   },
@@ -1312,16 +1365,12 @@
       "note": "Camoufox installs uBlock Origin as a default addon unless exclude_addons is passed. It is excluded here so the capture reflects the application's real requests. If this says an addon filter WAS active, the evidence in this session is incomplete."
     },
     "capture_policy": {
-      "media_extensions_aborted": [
-        ".avi",
-        ".mov",
-        ".mp3",
-        ".mp4",
-        ".wav"
-      ],
+      "listeners_attached_at": "browser_context",
+      "media_extensions_aborted": [],
       "methods_excluded": [
         "OPTIONS"
       ],
+      "request_routing_active": false,
       "request_samples_per_endpoint": 2,
       "resource_types_captured": [
         "xhr",
@@ -1329,6 +1378,7 @@
         "document"
       ],
       "response_samples_per_endpoint": 2,
+      "routing_note": "blanket page.route('**/*') is NOT installed: it disables the HTTP cache for routed requests and taxes every request, which distorts both timing and caching. No media is blocked.",
       "url_substrings_dropped_at_capture": [
         "dynatrace",
         "error-js",
@@ -1359,22 +1409,23 @@
     },
     "event_spine": {
       "available": true,
-      "events_emitted": 44,
+      "events_emitted": "<TRANSPORT>",
       "log": "events.jsonl",
       "mode": "dual_write",
       "note": "Events are written alongside the outputs above, incrementally, so an interrupted session still leaves a readable history. The structures in this manifest remain the behavioural authority; nothing reads the event log to produce them yet."
     },
     "finished_at": "<TS>",
+    "graphql_operations": {},
     "known_blind_spots": [
-      "Service-worker traffic is invisible to Playwright on Firefox.",
-      "WebSocket frames are not subscribed to (Playwright supports them on Firefox).",
-      "Server-Sent Events yield no incremental frames.",
-      "Request initiators and JS call stacks are not captured.",
-      "In-page hook buffers, DOM mutations, dropdown catalogs and jQuery events are read once at exit, from the top frame only, and are destroyed by every full page navigation. Only the final document is represented.",
-      "JS function hooks run on a 2s interval and miss calls made during initial page parse.",
+      "Service-worker traffic is invisible to Playwright on Firefox. When a service worker is detected a capture_gap is emitted.",
+      "WebSocket handshake headers are not exposed by Playwright, so auth sent on the upgrade is unobserved. Frames themselves ARE captured.",
+      "httpOnly cookie changes are only visible as periodic snapshots, not as a change stream. IndexedDB and Cache Storage are not captured.",
+      "Legacy named-function hooks run on a 2s interval and miss calls made during initial page parse. Proven unsolvable from injected JS; source rewriting is a later, gated capability.",
+      "Dropdown catalogs and jQuery events are still read once at exit, from the top frame only, and are destroyed by every full page navigation. User actions, runtime calls and DOM mutations are NOT: those are flushed before navigation by the runtime probe.",
       "NOISY_ENDPOINTS drops matching URLs at capture time; they are not recoverable from this session.",
       "Response bodies are truncated to 2 samples per endpoint.",
-      "Endpoint identity ignores the query string and does not template path parameters."
+      "Endpoint identity ignores the query string and does not template path parameters.",
+      "Runtime stacks are raw observation. No causal relationship between a runtime call and a network request is asserted at capture time."
     ],
     "schema": "scriptscrap/session-manifest/1",
     "scope": {
@@ -1399,6 +1450,43 @@
         "status",
         "count"
       ]
+    },
+    "sensors": {
+      "identity": {
+        "frame_tree": {
+          "f1": {
+            "page_id": "p1",
+            "parent_frame_id": null
+          }
+        },
+        "frames": 1,
+        "pages": 0
+      },
+      "lifecycle": {
+        "console_messages": 0,
+        "downloads": 0,
+        "page_exceptions": 0,
+        "pages": 1,
+        "popups": 0
+      },
+      "runtime": {
+        "batches": "<TRANSPORT>",
+        "events_ingested": "<TRANSPORT>",
+        "installed": true,
+        "unknown_types": []
+      },
+      "storage": {
+        "gaps_reported": [
+          "cache_storage",
+          "indexed_db"
+        ],
+        "snapshots": 1
+      },
+      "websocket": {
+        "frames_received": 0,
+        "frames_sent": 0,
+        "sockets": 0
+      }
     },
     "session_id": "<SESSION>",
     "snapshot_fidelity": {

@@ -1,0 +1,199 @@
+"""Lifecycle sensor: pages, frames, navigation, console, errors, downloads.
+
+Listeners are attached at the CONTEXT level wherever Playwright allows it, so a
+popup or a window opened by the application is observed on the same footing as
+the page the operator started on. A page-only listener would miss them entirely.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from typing import Any
+
+from ..events import EventType, Source
+from .identity import PageRegistry
+
+# Console output above this is clipped. A page that logs a megabyte object
+# should not be able to dominate the event log.
+MAX_CONSOLE_TEXT = 4096
+
+
+class LifecycleSensor:
+    """Pages, frames, navigation, console messages, exceptions and downloads."""
+
+    def __init__(self, engine: Any, registry: PageRegistry) -> None:
+        self.engine = engine
+        self.registry = registry
+        self.pages_seen = 0
+        self.popups_seen = 0
+        self.console_messages = 0
+        self.page_exceptions = 0
+        self.downloads = 0
+
+    # -- attachment --------------------------------------------------------
+    async def attach(self, context: Any) -> None:
+        """Observe every page in the context, including ones opened later."""
+        try:
+            context.on("page", self._on_page)
+        except Exception as exc:
+            self.engine.emit_sensor_error("lifecycle_attach_context", exc)
+            self.engine.emit_capture_gap(
+                "context_page_events_unavailable",
+                note="popups and new tabs may not be observed",
+            )
+        for page in getattr(context, "pages", []) or []:
+            self.observe_page(page)
+
+    def _on_page(self, page: Any) -> None:
+        self.observe_page(page, from_context=True)
+
+    def observe_page(self, page: Any, *, from_context: bool = False) -> str | None:
+        """Attach page-level listeners once per page."""
+        if getattr(page, "_scriptscrap_observed", False):
+            return self.registry.page_id(page)
+        with contextlib.suppress(AttributeError, TypeError):
+            page._scriptscrap_observed = True
+
+        page_id = self.registry.page_id(page)
+        self.pages_seen += 1
+
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.PAGE_OPENED,
+            page_id=page_id,
+            url=getattr(page, "url", None),
+            discovered_via="context" if from_context else "explicit",
+        )
+
+        page.on("close", lambda p=page: self._on_close(p))
+        page.on("popup", lambda p: self._on_popup(p, page_id))
+        page.on("frameattached", lambda f: self._on_frame_attached(f, page_id))
+        page.on("framedetached", lambda f: self._on_frame_detached(f, page_id))
+        page.on("framenavigated", lambda f: self._on_frame_navigated(f, page_id))
+        page.on("console", lambda m: self._on_console(m, page_id))
+        page.on("pageerror", lambda e: self._on_page_error(e, page_id))
+        page.on("download", lambda d: self._on_download(d, page_id))
+        return page_id
+
+    # -- handlers ----------------------------------------------------------
+    def _on_close(self, page: Any) -> None:
+        page_id = self.registry.forget_page(page)
+        self.engine.emit_event(Source.PLAYWRIGHT, EventType.PAGE_CLOSED, page_id=page_id)
+
+    def _on_popup(self, popup: Any, opener_page_id: str | None) -> None:
+        self.popups_seen += 1
+        popup_id = self.observe_page(popup, from_context=True)
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.POPUP_OPENED,
+            page_id=popup_id,
+            opener_page_id=opener_page_id,
+            url=getattr(popup, "url", None),
+        )
+
+    def _on_frame_attached(self, frame: Any, page_id: str | None) -> None:
+        frame_id = self.registry.frame_id(frame)
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.FRAME_ATTACHED,
+            page_id=page_id,
+            frame_id=frame_id,
+            parent_frame_id=self.registry.parent_frame_id(frame_id),
+            url=getattr(frame, "url", None),
+            name=getattr(frame, "name", None) or None,
+        )
+
+    def _on_frame_detached(self, frame: Any, page_id: str | None) -> None:
+        frame_id = self.registry.forget_frame(frame)
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.FRAME_DETACHED,
+            page_id=page_id,
+            frame_id=frame_id,
+        )
+
+    def _on_frame_navigated(self, frame: Any, page_id: str | None) -> None:
+        frame_id = self.registry.frame_id(frame)
+        is_main = False
+        try:
+            is_main = frame.parent_frame is None
+        except Exception as exc:
+            # Whether this was the main frame decides whether a
+            # navigation_committed is emitted, so failing to know is a real gap.
+            self.engine.emit_sensor_error(
+                "frame_navigated_is_main", exc, page_id=page_id, frame_id=frame_id
+            )
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.FRAME_NAVIGATED,
+            page_id=page_id,
+            frame_id=frame_id,
+            parent_frame_id=self.registry.parent_frame_id(frame_id),
+            url=getattr(frame, "url", None),
+            is_main_frame=is_main,
+        )
+        if is_main:
+            self.engine.emit_event(
+                Source.PLAYWRIGHT,
+                EventType.NAVIGATION_COMMITTED,
+                page_id=page_id,
+                frame_id=frame_id,
+                url=getattr(frame, "url", None),
+            )
+
+    def _on_console(self, message: Any, page_id: str | None) -> None:
+        self.console_messages += 1
+        try:
+            text = message.text
+        except Exception as exc:
+            self.engine.emit_sensor_error("console_text", exc, page_id=page_id)
+            return
+        location = None
+        # Source location is a bonus, not the message. Losing it must not lose
+        # the console message itself.
+        with contextlib.suppress(Exception):
+            loc = message.location
+            if loc:
+                location = f"{loc.get('url', '')}:{loc.get('lineNumber', '')}"
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.CONSOLE_MESSAGE,
+            page_id=page_id,
+            level=getattr(message, "type", None),
+            text=text[:MAX_CONSOLE_TEXT] if isinstance(text, str) else str(text),
+            truncated=isinstance(text, str) and len(text) > MAX_CONSOLE_TEXT,
+            location=location,
+        )
+
+    def _on_page_error(self, error: Any, page_id: str | None) -> None:
+        self.page_exceptions += 1
+        # An uncaught exception is often the fastest route to understanding an
+        # application's contract, so the stack is kept.
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.PAGE_EXCEPTION,
+            page_id=page_id,
+            name=getattr(error, "name", None),
+            message=getattr(error, "message", None) or str(error),
+            stack=(getattr(error, "stack", None) or "")[:MAX_CONSOLE_TEXT] or None,
+        )
+
+    def _on_download(self, download: Any, page_id: str | None) -> None:
+        self.downloads += 1
+        # Metadata only. File content never enters the event log.
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.DOWNLOAD,
+            page_id=page_id,
+            url=getattr(download, "url", None),
+            suggested_filename=getattr(download, "suggested_filename", None),
+        )
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "pages": self.pages_seen,
+            "popups": self.popups_seen,
+            "console_messages": self.console_messages,
+            "page_exceptions": self.page_exceptions,
+            "downloads": self.downloads,
+        }

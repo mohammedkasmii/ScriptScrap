@@ -53,6 +53,18 @@ PINNED_ENV_KEYS = frozenset(
 # Keys carrying a monotonic clock reading. Ordering is asserted separately.
 MONOTONIC_KEYS = frozenset({"t_mono"})
 
+# Transport metrics, not behaviour. `batches` counts how many IPC round trips
+# the runtime probe used to deliver its events; the same events can arrive in a
+# different number of batches depending on how the flush timer lands. The event
+# COUNT next to it is behaviour and stays pinned.
+#
+# `events_emitted` and `events_ingested` are totals that INCLUDE timer-batched
+# events, so they inherit that batching's load sensitivity: the same observed
+# mutations arrive as 6 or 7 dom_mutation events. The per-type counts and
+# `dom_mutations_observed` carry the behavioural signal instead.
+TRANSPORT_KEYS = frozenset({"batches", "events_emitted", "events_ingested"})
+PLACEHOLDER_TRANSPORT = "<TRANSPORT>"
+
 
 def normalize_text(text: str) -> str:
     """Apply every string-level rule, most specific first."""
@@ -75,6 +87,8 @@ def normalize(value: Any, *, key: str | None = None) -> Any:
         return PLACEHOLDER_PINNED
     if key in MONOTONIC_KEYS:
         return PLACEHOLDER_MONO
+    if key in TRANSPORT_KEYS:
+        return PLACEHOLDER_TRANSPORT
     if isinstance(value, str):
         return normalize_text(value)
     if isinstance(value, dict):
