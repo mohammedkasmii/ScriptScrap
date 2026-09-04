@@ -158,8 +158,52 @@ class DatasetExporter:
                  "evidence_ids": f.evidence.event_ids}
                 for f in result.findings
             ],
+            # --- forensic evidence, sanitised ---------------------------
+            # Script SOURCE is never exported. A target application's code is
+            # its own; the hash lets a holder of the raw session prove which
+            # file this describes, and the inventory says what is in it without
+            # reproducing it.
+            "scripts": [
+                {
+                    "url": r.scrub_text(s.get("url") or ""),
+                    "sha256": s.get("sha256"),
+                    "size": s.get("size"),
+                    "media_type": s.get("media_type"),
+                    "source_map": s.get("source_map"),
+                    "declared_functions": (s.get("inventory") or {}).get(
+                        "declared_functions", []),
+                    "network_apis": (s.get("inventory") or {}).get("network_apis", []),
+                    "url_literals": [
+                        r.scrub_text(u)
+                        for u in (s.get("inventory") or {}).get("url_literals", [])
+                    ],
+                    "evidence_ids": s.get("evidence_ids", []),
+                    "note": "source text is NOT exported; it remains in the local blob store",
+                }
+                for s in result.scripts
+            ],
+            "capture_health": result.health,
+            "reconciliation": self._reconciliation(result),
             "redaction": self.redactor.stats(),
         }
+
+    @staticmethod
+    def _reconciliation(result: AnalysisResult) -> dict[str, Any]:
+        """Multi-sensor agreement, as counts and relationships only."""
+        from ..analysis.reconcile import summarise
+
+        summary = summarise(result.activities) if result.activities else {}
+        conflicts = [
+            {
+                "activity": a.key,
+                "relation": a.relation,
+                "sensors": sorted(a.sensors),
+                "conflicts": a.conflicts,
+                "evidence_ids": a.evidence.event_ids,
+            }
+            for a in result.activities if a.conflicts
+        ]
+        return {"summary": summary, "conflicts": conflicts}
 
     def _safe_signals(self, signals: dict[str, Any]) -> dict[str, Any]:
         """Keep shape-describing signals; redact anything carrying a value."""

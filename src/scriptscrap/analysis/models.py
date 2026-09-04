@@ -244,3 +244,8 @@ class AnalysisResult:
     transitions: list[StateTransition] = field(default_factory=list)
     technologies: list[Technology] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
+    # Forensic-era additions. Empty on a normal session, which is what keeps
+    # analysis working without the extension.
+    activities: list[Any] = field(default_factory=list)
+    health: dict[str, Any] | None = None
+    scripts: list[dict[str, Any]] = field(default_factory=list)

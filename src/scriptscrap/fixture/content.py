@@ -48,6 +48,29 @@ NOT_FOUND_JSON = '{"error": "not_found", "code": "E-FIXTURE-404"}'
 
 VALIDER_REFERENCE = "REF-FIXTURE-9001"
 
+# Byte-identical payload served from two endpoints, to prove content-addressed
+# deduplication stores one blob.
+TWIN_JSON = '{"twin": true, "payload": "FIXTURE-TWIN-PAYLOAD-0001"}'
+
+# The parse-time case, in its own file so a forensic sensor can observe the
+# SOURCE before Firefox parses it. The function is declared and called in the
+# same parse, which is exactly what an injected interval hook cannot catch:
+# by the time any wrapper could replace the function, the call has happened.
+EARLY_JS = """/* fixture: declaration and call in one parse */
+function fixtureEarlyFunction(a, b) {
+  return a + b;
+}
+window.fixtureEarlyFunction = fixtureEarlyFunction;
+window.__fixtureEarlyResult = fixtureEarlyFunction(20, 22);
+
+function fixtureLateFunction(a, b) {
+  return a * b;
+}
+window.fixtureLateFunction = fixtureLateFunction;
+
+fetch("/api/referentiel?type=garage");
+"""
+
 # --------------------------------------------------------------------------- #
 # A 1x1 fully transparent RGBA PNG. Hardcoded bytes, not generated.
 # --------------------------------------------------------------------------- #

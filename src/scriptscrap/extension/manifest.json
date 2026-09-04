@@ -1,0 +1,26 @@
+{
+  "manifest_version": 2,
+  "name": "ScriptScrap Forensic Sensor",
+  "version": "1.0",
+  "description": "Observation-only forensic sensor for authorised ScriptScrap investigations.",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "forensic-sensor@scriptscrap.local",
+      "strict_min_version": "115.0"
+    }
+  },
+
+  "permissions": [
+    "webRequest",
+    "webRequestBlocking",
+    "cookies",
+    "webNavigation",
+    "<all_urls>"
+  ],
+
+  "background": {
+    "scripts": ["config.js", "background.js"],
+    "persistent": true
+  }
+}

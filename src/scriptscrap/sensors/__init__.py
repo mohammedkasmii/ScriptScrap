@@ -9,6 +9,8 @@ also feeds the M1 exporters that remain the behavioural authority. These sensors
 cover what was previously unobserved.
 """
 
+from ..storage import BlobStore
+from .extension import ExtensionSensor
 from .graphql import describe as describe_graphql
 from .graphql import looks_like_graphql, operation_label
 from .identity import PageRegistry
@@ -18,6 +20,8 @@ from .storage import StorageSensor
 from .websocket import WebSocketSensor
 
 __all__ = [
+    "BlobStore",
+    "ExtensionSensor",
     "LifecycleSensor",
     "PageRegistry",
     "RuntimeSensor",

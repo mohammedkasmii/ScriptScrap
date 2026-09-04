@@ -26,14 +26,17 @@ from camoufox.async_api import AsyncCamoufox
 # ---------------------------------------------------------------------------
 EV: Any
 SENSORS: Any
+FORENSIC: Any
 try:
     from scriptscrap import events as EV
+    from scriptscrap import extension as FORENSIC
     from scriptscrap import sensors as SENSORS
 
     EVENTS_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only in a bare venv
     EV = None
     SENSORS = None
+    FORENSIC = None
     EVENTS_AVAILABLE = False
 
 OUTPUT_DIR = Path("v13_investigation_output")
@@ -487,6 +490,13 @@ class WebHarvester:
         self.websocket_sensor = None
         self.storage_sensor = None
         self.graphql_operations = {}
+
+        # --- optional forensic layer (M4) ----------------------------------
+        # Off unless explicitly enabled. Normal capture never touches these.
+        self.forensic_config = None
+        self.extension_sensor = None
+        self.extension_transport = None
+        self.blob_store = None
         self.launch_options_record = {}
         self.started_at = datetime.now(UTC)
 
@@ -1208,12 +1218,20 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
                 "request_samples_per_endpoint": 2,
                 "listeners_attached_at": "browser_context",
             },
+            "forensic": (
+                self.forensic_config.to_manifest() if self.forensic_config is not None
+                else {"mode": "normal", "note": "forensic layer not enabled"}
+            ),
             "sensors": {
                 "lifecycle": self.lifecycle_sensor.stats() if self.lifecycle_sensor else None,
                 "runtime": self.runtime_sensor.stats() if self.runtime_sensor else None,
                 "websocket": self.websocket_sensor.stats() if self.websocket_sensor else None,
                 "storage": self.storage_sensor.stats() if self.storage_sensor else None,
                 "identity": self.registry.snapshot() if self.registry else None,
+                "extension": (
+                    self.extension_sensor.stats() if self.extension_sensor else None),
+                "extension_transport": (
+                    self.extension_transport.stats() if self.extension_transport else None),
             },
             "graphql_operations": {
                 path: sorted(ops) for path, ops in sorted(self.graphql_operations.items())
@@ -1321,6 +1339,69 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
               f"out-of-scope (metadata only): {len(self.out_of_scope)}")
         print("   ⚠  This directory contains unredacted authenticated capture. "
               "It is gitignored. Do not share it.")
+
+def start_forensic_layer(engine, forensic_config):
+    """Bring up the extension transport before the browser launches.
+
+    Returns launch kwargs to merge (the addon path), or {} when forensic mode
+    is off. Called BEFORE launch because the extension must be built with the
+    transport port already known -- a background script takes no arguments.
+
+    Failure here is deliberately non-fatal: forensic mode is an addition to
+    normal capture, so a transport that cannot bind should cost the extra
+    evidence, not the session.
+    """
+    if not (forensic_config and forensic_config.enabled and EVENTS_AVAILABLE):
+        return {}
+
+    engine.forensic_config = forensic_config
+    try:
+        blob_root = OUTPUT_DIR / "blobs"
+        engine.blob_store = SENSORS.BlobStore(
+            blob_root, max_bytes=forensic_config.max_blob_bytes)
+        engine.extension_sensor = SENSORS.ExtensionSensor(engine, engine.blob_store)
+        engine.extension_transport = FORENSIC.ExtensionTransport(
+            engine.extension_sensor.on_batch).start()
+
+        extension_dir = FORENSIC.build_extension(
+            port=engine.extension_transport.port,
+            scope_hosts=sorted(engine.scope.roots),
+            max_body_bytes=forensic_config.max_body_bytes,
+            capture_bodies=forensic_config.capture_bodies,
+            capture_scripts=forensic_config.capture_scripts,
+            rewrite_targets=[t.to_dict() for t in forensic_config.rewrite_targets]
+            if forensic_config.rewriting_active else [],
+        )
+        engine.extension_dir = extension_dir
+        print(f"    [forensic] extension on port {engine.extension_transport.port}")
+        return {"addons": [str(extension_dir)]}
+    except Exception as exc:
+        engine.emit_sensor_error("forensic_layer_start", exc)
+        engine.emit_capture_gap(
+            "forensic_layer_unavailable",
+            note="extension sensor could not start; capture continues without it",
+        )
+        return {}
+
+
+def stop_forensic_layer(engine):
+    """Tear down the transport and remove the generated extension directory."""
+    if engine.extension_transport is not None:
+        engine.emit_event(
+            EV.Source.EXTENSION, EV.EventType.FORENSIC_SENSOR_STOPPED,
+            **engine.extension_transport.stats(),
+        )
+        if not engine.extension_transport.connected and engine.extension_sensor \
+                and not engine.extension_sensor.started:
+            engine.emit_capture_gap(
+                "extension_disconnected",
+                note="the extension never connected; no forensic evidence was collected",
+            )
+        engine.extension_transport.stop()
+    extension_dir = getattr(engine, "extension_dir", None)
+    if extension_dir is not None:
+        FORENSIC.cleanup_extension(extension_dir)
+
 
 async def attach_engine_to_page(page, engine):
     """Wire an engine and all observation sensors to a page and its context.

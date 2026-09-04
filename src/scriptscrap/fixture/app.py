@@ -271,6 +271,36 @@ class _MainHandler(_FixtureHandler):
             )
         if path == "/api/sse":
             return _SSE_SENTINEL
+        if path == "/api/early.js":
+            return _Response(200, "application/javascript; charset=utf-8",
+                             content.EARLY_JS.encode("utf-8"))
+        if path == "/api/big":
+            # Deliberately over a small configured limit, so the size-limit
+            # path is exercised rather than argued about.
+            return _Response(200, "text/plain; charset=utf-8",
+                             (b"BIGBODY" * 40000))
+        if path in ("/api/twin-a", "/api/twin-b"):
+            # Byte-identical bodies from two endpoints: content addressing must
+            # store one blob, not two.
+            return _json(content.TWIN_JSON)
+        if path == "/api/setcookie":
+            return _Response(
+                200, CT_JSON, b'{"ok": true}',
+                (
+                    ("Set-Cookie",
+                     "fixture_visible=FIXTURE_VISIBLE_0001; Path=/"),
+                    # httpOnly: page JavaScript can never read this one, so only
+                    # a browser-level sensor can observe it.
+                    ("Set-Cookie",
+                     "fixture_httponly=FIXTURE_HTTPONLY_TOKEN_0001; Path=/; HttpOnly"),
+                ),
+            )
+        if path == "/api/delcookie":
+            return _Response(
+                200, CT_JSON, b'{"ok": true}',
+                (("Set-Cookie",
+                  "fixture_visible=; Path=/; Max-Age=0"),),
+            )
         if path.startswith("/api/items/"):
             return _json(json.dumps(_item_payload(path.rsplit("/", 1)[-1])))
         if path.startswith("/api/"):

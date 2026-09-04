@@ -98,6 +98,26 @@ class EventType(StrEnum):
     # Legacy: the named-function hook dump read once at exit.
     RUNTIME_HOOKS = "runtime_hooks"
 
+    # --- forensic layer (M4) --------------------------------------------
+    # Emitted only in forensic mode, by the optional Firefox extension. They
+    # are separate types rather than reusing the HTTP ones because they are a
+    # DIFFERENT SENSOR'S observation of possibly the same activity, and
+    # collapsing them would destroy the corroboration the reconciler looks for.
+    FORENSIC_SENSOR_STARTED = "forensic_sensor_started"
+    FORENSIC_SENSOR_STOPPED = "forensic_sensor_stopped"
+    EXTENSION_REQUEST = "extension_request"
+    EXTENSION_REQUEST_HEADERS = "extension_request_headers"
+    EXTENSION_RESPONSE = "extension_response"
+    EXTENSION_REQUEST_FAILED = "extension_request_failed"
+    EXTENSION_REDIRECT = "extension_redirect"
+    EXTENSION_NAVIGATION = "extension_navigation"
+    RESPONSE_BODY_CAPTURED = "response_body_captured"
+    RESPONSE_BODY_SKIPPED = "response_body_skipped"
+    SCRIPT_SOURCE = "script_source"
+    SOURCE_REWRITE = "source_rewrite"
+    COOKIE_CHANGED = "cookie_changed"
+    COOKIE_DELETED = "cookie_deleted"
+
     # Honesty about the limits of observation
     SENSOR_ERROR = "sensor_error"
     CAPTURE_GAP = "capture_gap"

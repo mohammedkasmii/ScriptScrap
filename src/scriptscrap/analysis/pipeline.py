@@ -14,7 +14,9 @@ from pathlib import Path
 from ..events import Event, EventLogReader, EventType
 from .correlation import CorrelationAnalyzer
 from .endpoints import EndpointAnalyzer, endpoint_key_for_request
+from .health import HealthAnalyzer
 from .models import ANALYSIS_VERSION, AnalysisResult, Evidence, Finding
+from .reconcile import Reconciler
 from .schema import SchemaInferrer
 from .selectors import SelectorAnalyzer
 from .states import StateAnalyzer
@@ -42,8 +44,35 @@ def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
     result.dependencies = CorrelationAnalyzer().analyze(events, endpoint_of)
     result.ui_elements = SelectorAnalyzer().analyze(events)
     result.states, result.transitions = StateAnalyzer().analyze(events)
+    # Forensic evidence, when present. A normal session yields empty lists and
+    # a health report built from the sensors that did run -- analysis must
+    # never require the extension.
+    result.activities = Reconciler().analyze(events)
+    result.health = HealthAnalyzer().analyze(events).to_dict()
+    result.scripts = _script_inventory(events)
+
     result.findings = _findings(events, result)
     return result
+
+
+def _script_inventory(events: list[Event]) -> list[dict]:
+    """Captured script source, as metadata. Source text stays in blobs."""
+    scripts = []
+    for event in events:
+        if event.type is not EventType.SCRIPT_SOURCE:
+            continue
+        payload = event.payload
+        body = payload.get("body") or {}
+        scripts.append({
+            "url": payload.get("url"),
+            "sha256": body.get("sha256"),
+            "size": body.get("size") or (payload.get("inventory") or {}).get("size"),
+            "media_type": payload.get("media_type"),
+            "source_map": payload.get("source_map"),
+            "inventory": payload.get("inventory") or {},
+            "evidence_ids": [event.event_id],
+        })
+    return scripts
 
 
 def analyze_log(path: str | Path) -> AnalysisResult:

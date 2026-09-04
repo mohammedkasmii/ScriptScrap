@@ -5,8 +5,8 @@ A black-box web-application investigation engine built on
 by hand; ScriptScrap observes it and exports a dataset a developer can use to
 understand and automate the platform.
 
-Current state: **M1** — the investigator is a single script with a safety system
-around it. See `docs/` for the architecture blueprint this is being built toward.
+Capture is observation-first: it must never become the reason the application
+behaves differently. An optional forensic layer goes deeper, and says so.
 
 ## Setup
 
@@ -58,6 +58,30 @@ gitignored by pattern and carries its own `SECURITY.md`. Read
 configuration, the scope policy and the known blind spots that produced the
 evidence.
 
+## Forensic mode (optional)
+
+Normal capture uses Playwright sensors plus an in-page runtime probe. **Forensic
+mode adds a Firefox WebExtension** that sees what those cannot: full response
+bodies (via Firefox's `filterResponseData`), script source *before* it is
+parsed, and the real cookie jar including `httpOnly`.
+
+It is entirely optional — nothing in normal capture or offline analysis requires
+it — and whatever is enabled is written verbatim into the session manifest.
+
+Response bodies go into a content-addressed blob store (`blobs/<sha256>`), so
+identical payloads are stored once and the event log keeps only a hash and a
+size. Oversized bodies are recorded as skipped **with a reason**, never dropped
+silently.
+
+Source *rewriting* has its own separate opt-in. Enabling forensic mode does not
+enable it, because rewriting a response before the browser parses it means the
+application no longer runs the code its author shipped — that is intervention,
+not observation, and the two must not share a switch.
+
+```bash
+uv run scriptscrap health v13_investigation_output   # did we fail to see it?
+```
+
 ## Analysing a session
 
 Analysis is **offline**: it reads the recorded event log and never launches a
@@ -90,7 +114,10 @@ src/scriptscrap/
   sensors/     observation sensors (lifecycle, runtime, websocket, storage)
   probe/       the injected in-page observer
   analysis/    OFFLINE inference: endpoints, schemas, correlation, selectors,
-               states, technology. Imports no browser -- enforced by test.
+               states, technology, reconciliation, capture health.
+               Imports no browser -- enforced by test.
+  extension/   optional Firefox forensic sensor (MV2) + loopback transport
+  storage/     content-addressed blob store for raw evidence
   export/      sanitised shareable dataset
   cli.py       scriptscrap analyze / export
   fixture/     deterministic local app used as the test laboratory

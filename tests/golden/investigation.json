@@ -1786,6 +1786,10 @@
       "note": "Events are written alongside the outputs above, incrementally, so an interrupted session still leaves a readable history. The structures in this manifest remain the behavioural authority; nothing reads the event log to produce them yet."
     },
     "finished_at": "<TS>",
+    "forensic": {
+      "mode": "normal",
+      "note": "forensic layer not enabled"
+    },
     "graphql_operations": {
       "/api/graphql": [
         "mutation ValiderItem"
@@ -1827,6 +1831,8 @@
       ]
     },
     "sensors": {
+      "extension": null,
+      "extension_transport": null,
       "identity": {
         "frame_tree": {
           "f1": {

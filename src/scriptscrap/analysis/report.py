@@ -168,6 +168,36 @@ def render(result: AnalysisResult) -> str:
              for t in result.transitions],
         )
 
+    # -- capture health ----------------------------------------------------
+    if result.health:
+        health = result.health
+        lines += ["## Capture health", "",
+                  f"**{health['overall']}**", "",
+                  "Whether the application did nothing, or ScriptScrap failed to "
+                  "see it. Statuses are categories; a percentage appears only "
+                  "where a real denominator exists.", ""]
+        lines += _table(
+            ["Sensor", "Status", "Why"],
+            [[s_["sensor"], s_["status"], "; ".join(s_["reasons"]) or "-"]
+             for s_ in health["sensors"]],
+        )
+        if health.get("notes"):
+            lines += ["### Notes", ""]
+            lines += [f"- {n}" for n in health["notes"]] + [""]
+
+    # -- forensic scripts --------------------------------------------------
+    if result.scripts:
+        lines += ["## Captured scripts", "",
+                  "Source text stays in the local blob store; this is an "
+                  "inventory of what each file declares.", ""]
+        lines += _table(
+            ["Script", "sha256", "Size", "Declared functions", "Network APIs"],
+            [[f"`{(s_.get('url') or '')[-48:]}`", (s_.get("sha256") or "")[:12],
+              s_.get("size"), len((s_.get("inventory") or {}).get("declared_functions", [])),
+              ", ".join((s_.get("inventory") or {}).get("network_apis", [])) or "-"]
+             for s_ in result.scripts],
+        )
+
     # -- findings ----------------------------------------------------------
     lines += ["## Capture gaps and caveats", "",
               "What the tool knows it did **not** see. Absence here is the "

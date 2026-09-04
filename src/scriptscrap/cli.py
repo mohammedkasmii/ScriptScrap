@@ -93,6 +93,23 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_health(args: argparse.Namespace) -> int:
+    """Print the capture-health assessment for a recorded session."""
+    result = analyze_log(_resolve_log(Path(args.session)))
+    health = result.health or {}
+    print("CAPTURE HEALTH\n")
+    width = max((len(s["sensor"]) for s in health.get("sensors", [])), default=10)
+    for sensor in health.get("sensors", []):
+        reasons = "; ".join(sensor["reasons"])
+        print(f"  {sensor['sensor']:<{width}}  {sensor['status']:<16}{reasons}")
+    if health.get("notes"):
+        print("\nObserved gaps:")
+        for note in health["notes"]:
+            print(f"  - {note}")
+    print(f"\nOverall:\n  {health.get('overall', 'unknown')}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scriptscrap",
@@ -113,6 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
     summary = sub.add_parser("summary", help="print the sanitised dataset as JSON")
     summary.add_argument("session", help="session directory or events.jsonl path")
     summary.set_defaults(func=cmd_summary)
+
+    health = sub.add_parser("health", help="print the capture-health assessment")
+    health.add_argument("session", help="session directory or events.jsonl path")
+    health.set_defaults(func=cmd_health)
 
     return parser
 
