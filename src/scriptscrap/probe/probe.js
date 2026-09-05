@@ -157,6 +157,15 @@
     } catch (e) { /* a record that cannot cross is lost, not fatal */ }
   }
 
+  // The document's navigation-start epoch. Both JS worlds of one document
+  // share it, and a navigation replaces it -- which makes it exactly the
+  // identifier for "same document instance". `ordinal` restarts per document
+  // while a frame id survives navigation, so an ordinal is only comparable
+  // against another one carrying the same origin.
+  const TIME_ORIGIN = (() => {
+    try { return performance.timeOrigin; } catch (e) { return null; }
+  })();
+
   function mk(type, payload) {
     return {
       type: type,
@@ -164,6 +173,7 @@
       // Which world observed this. The two roles count ordinals independently,
       // so an ordinal is only comparable within one world.
       world: ROLE,
+      t_origin: TIME_ORIGIN,
       t_page: nowMs(),
       url: location.href,
       frame_url: location.href,

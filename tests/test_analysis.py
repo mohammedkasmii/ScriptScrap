@@ -244,8 +244,16 @@ def test_a_value_appearing_only_after_the_consumer_is_not_a_source():
         "an edge was created against the observed order"
 
 
-def test_cross_sensor_events_without_timestamps_are_not_ordered():
-    """`seq` must not be used to order events from different sensors."""
+def test_cross_sensor_events_with_identical_timestamps_are_never_called_ordered():
+    """`seq` must not be used to order events from different sensors.
+
+    Identical cross-sensor timestamps establish nothing about order. They also
+    do not disprove the relationship, and dropping the pair outright is how a
+    real capture lost a genuine `#search-input` -> `?search` dependency while
+    keeping a coincidental one. So the pair may survive as a hypothesis -- but
+    it must be labelled ambiguous, must never claim `precedes`, and must never
+    borrow the spine's `seq` to manufacture an order.
+    """
     same = "2026-01-01T00:00:00.000+00:00"
     producer = ev(EventType.STORAGE_CHANGE,
                   {"op": "set", "store": "localStorage", "key": "k",
@@ -257,7 +265,14 @@ def test_cross_sensor_events_without_timestamps_are_not_ordered():
                   source=Source.PLAYWRIGHT, wall=same)
     events = [producer, consumer]
     edges = CorrelationAnalyzer().analyze(events, _endpoint_map(events))
-    assert edges == [], "identical timestamps across sensors must not imply order"
+
+    for edge in edges:
+        signals = edge.evidence.signals
+        assert signals["ordering_relation"] == "ambiguous", signals
+        assert signals["ordering_method"] == "within_clock_uncertainty", signals
+        assert "seq" not in signals["ordering_method"]
+        assert "NOT established" in signals["ordering_caveat"]
+        assert edge.confidence < 0.8, "an unordered pair must not score like a proven one"
 
 
 def test_field_name_similarity_normalises_naming_styles():

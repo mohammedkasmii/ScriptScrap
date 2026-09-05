@@ -105,9 +105,30 @@ def test_every_dependency_carries_its_evidence(result):
 
 def test_no_dependency_relies_on_cross_sensor_ingest_order(result):
     """M2 proved seq is ingest order; nothing may claim causality from it."""
+    seq_based = {"same_source_seq", "same_source_seq_tie"}
+    established = {"probe_ordinal", "same_document_clock", "same_source_seq",
+                   "wall_clock"}
+    unestablished = {"probe_ordinal_tie", "same_source_seq_tie",
+                     "within_probe_clock_resolution", "within_clock_uncertainty",
+                     "unordered"}
+
     for edge in result.dependencies:
-        method = edge.evidence.signals.get("ordering_method")
-        assert method in {"probe_ordinal", "same_source_seq", "wall_clock"}, method
+        signals = edge.evidence.signals
+        method = signals.get("ordering_method")
+        relation = signals.get("ordering_relation")
+        assert method in established | unestablished, method
+
+        # A seq-based method is only legitimate within one sensor's own channel.
+        if method in seq_based:
+            assert signals.get("same_document_instance") is not None
+
+        # The load-bearing rule: `precedes` may only come from a mechanism that
+        # can establish it, and everything else must say so.
+        if relation == "precedes":
+            assert method in established, f"{relation} claimed from {method}"
+        else:
+            assert method in unestablished, f"{relation} claimed from {method}"
+            assert "ordering_caveat" in signals
 
 
 # --- selectors -----------------------------------------------------------

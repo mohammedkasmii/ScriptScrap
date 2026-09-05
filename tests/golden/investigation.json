@@ -1869,6 +1869,7 @@
           "storage": true,
           "xhr_send": true
         },
+        "reduced_out_of_scope": 0,
         "unknown_types": []
       },
       "storage": {

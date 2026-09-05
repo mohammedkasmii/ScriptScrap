@@ -16,7 +16,9 @@ them with network events; that is M3's job over the recorded log.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from ..events import EventType, Source
 from ..probe import (
@@ -49,6 +51,67 @@ PROBE_EVENT_TYPES: dict[str, EventType] = {
     "sensor_error": EventType.SENSOR_ERROR,
 }
 
+# --- engagement boundary on the runtime path ------------------------------
+#
+# Playwright's handlers enforce InvestigationScope; this path did not. The
+# probe patches the globals of an IN-SCOPE page, but that page's own third-party
+# scripts call `fetch` to wherever they like -- so a scope check on the FRAME
+# passes while the request target is somebody else's analytics endpoint. A real
+# capture recorded 504 out-of-scope runtime observations, 213 of them carrying
+# full query strings.
+#
+# The same policy as the Playwright path applies here: out of scope means
+# metadata only.
+
+# Payload keys that hold a URL. Any of them is stripped of query and fragment
+# when its own host is out of scope, wherever it appears.
+URL_PAYLOAD_KEYS = ("url", "action", "from", "frame_url")
+
+# Everything a reduced (out-of-scope) event may keep. An allowlist, because a
+# denylist silently admits every payload key added later.
+REDUCED_KEEP_KEYS = frozenset({
+    "method", "status", "via", "op", "store", "async", "count", "overflow",
+    "probe_ordinal", "probe_world", "probe_time_ms", "probe_time_origin",
+    "is_top_frame",
+})
+
+# A URL inside a stack frame, e.g. `handler@https://host/app.js?v=3:12:5`.
+_STACK_URL = re.compile(r"https?://[^\s)]+")
+
+
+def _strip_query(url: str) -> str:
+    """`https://h/p?a=secret#frag` -> `https://h/p`. Origin and path survive."""
+    parsed = urlsplit(url)
+    if not parsed.scheme and not parsed.netloc:
+        return url.split("?", 1)[0].split("#", 1)[0]
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _redact_stack_frame(scope: Any, frame: Any) -> Any:
+    """Strip query values from any out-of-scope script URL inside a stack frame.
+
+    A stack is the evidence for WHICH code made a call, and that is worth
+    keeping. The parameters on a third-party script's URL are not.
+    """
+    if not isinstance(frame, str):
+        return frame
+
+    def replace(match: re.Match) -> str:
+        # A frame is `...url:line:column`; the trailing position is not part of
+        # the URL and must survive the strip.
+        raw = match.group(0)
+        position = ""
+        while raw and raw[-1].isdigit():
+            head, _, tail = raw.rpartition(":")
+            if not head or not tail.isdigit():
+                break
+            position = ":" + tail + position
+            raw = head
+        return (raw if scope.contains(raw) else _strip_query(raw)) + position
+
+    return _STACK_URL.sub(replace, frame)
+
+
 DEFAULT_PROBE_CONFIG = {
     "maxBuffer": 500,
     "flushIntervalMs": 400,
@@ -70,6 +133,7 @@ class RuntimeSensor:
         self.batches = 0
         self.unknown_types: set[str] = set()
         self._installed = False
+        self.reduced_out_of_scope = 0
         self.main_world_installs = 0
         self.main_world_failures = 0
         self.main_world_verified: dict[str, bool] | None = None
@@ -205,14 +269,76 @@ class RuntimeSensor:
         # so `probe_ordinal` is only comparable within one world -- the same
         # rule that applies to `seq` across sensors.
         payload["probe_world"] = record.get("world") or "isolated"
+        # The document instance. An ordinal restarts on navigation while a
+        # frame id survives it, so neither the ordinal nor the in-page clock
+        # means anything against an observation carrying a different origin.
+        payload["probe_time_origin"] = record.get("t_origin")
         payload["probe_time_ms"] = record.get("t_page")
         payload["frame_url"] = record.get("frame_url")
         payload["is_top_frame"] = record.get("is_top")
+
+        payload = self._apply_scope(payload)
 
         self.received += 1
         self.engine.emit_event(
             Source.RUNTIME, event_type, page_id=page_id, frame_id=frame_id, **payload
         )
+
+    # -- engagement boundary ------------------------------------------------
+    def _apply_scope(self, payload: dict) -> dict:
+        """Reduce an observation whose subject lies outside the engagement.
+
+        Two independent reductions, because they protect different things:
+
+        1. Every URL-valued field -- including the stack -- loses its query and
+           fragment when ITS OWN host is out of scope. A stack frame naming a
+           third-party script can carry that script's URL parameters, so this
+           applies even on an in-scope observation.
+        2. When the observation's own subject is out of scope, the payload is
+           rebuilt from an allowlist: method, status and the probe's own
+           bookkeeping survive; bodies, header names, typed values, storage
+           values and element detail do not.
+
+        The event is kept rather than dropped. "A third-party call happened
+        here" is the same forensic fact the Playwright path preserves, and
+        losing it would make an out-of-scope page look silent.
+        """
+        scope = getattr(self.engine, "scope", None)
+        if scope is None:
+            return payload
+
+        for key in URL_PAYLOAD_KEYS:
+            value = payload.get(key)
+            if isinstance(value, str) and value and not scope.contains(value):
+                payload[key] = _strip_query(value)
+
+        stack = payload.get("stack")
+        if isinstance(stack, list):
+            payload["stack"] = [_redact_stack_frame(scope, f) for f in stack]
+
+        subject = (payload.get("url") or payload.get("action")
+                   or payload.get("frame_url"))
+        if not isinstance(subject, str) or not subject or scope.contains(subject):
+            return payload
+
+        reduced = {k: v for k, v in payload.items() if k in REDUCED_KEEP_KEYS}
+        for key in URL_PAYLOAD_KEYS:
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                # Every URL on a reduced event loses its query, including one
+                # that is itself in scope. A record labelled metadata-only must
+                # be metadata-only throughout, or a reader filtering on that
+                # label gets a surprise: `runtime_history` to a third-party URL
+                # was keeping the full in-scope `from` URL beside it. The
+                # in-scope side of that navigation is recorded on the in-scope
+                # path anyway, so nothing is actually lost here.
+                reduced[key] = _strip_query(value)
+        removed = sorted(k for k in payload if k not in reduced)
+        reduced["scope"] = "out_of_scope"
+        reduced["evidence_reduced"] = True
+        reduced["evidence_removed"] = removed
+        self.reduced_out_of_scope += 1
+        return reduced
 
     async def drain(self, page: Any) -> None:
         """Ask every frame to flush before the session ends."""
@@ -233,6 +359,9 @@ class RuntimeSensor:
             "batches": self.batches,
             "events_ingested": self.received,
             "unknown_types": sorted(self.unknown_types),
+            # Observations kept as metadata because their subject was outside
+            # the engagement. Disclosed, so a reader can see the boundary ran.
+            "reduced_out_of_scope": self.reduced_out_of_scope,
             "main_world_installs": self.main_world_installs,
             "main_world_failures": self.main_world_failures,
             "main_world_verified": self.main_world_verified,

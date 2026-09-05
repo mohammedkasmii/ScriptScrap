@@ -99,6 +99,19 @@ def _attribute_events(events: list[Event], endpoints) -> dict[str, str]:
             key = by_url.get((event.payload.get("method", ""), event.payload.get("url", "")))
             if key:
                 mapping[event.event_id] = key
+
+    # The runtime probe's view of a request is the SAME activity the network
+    # sensor saw, so it belongs to the same endpoint. Attributing it to a
+    # pseudo-endpoint instead would make one request look like two places a
+    # value appeared, which is the input to the "is this value distinctive?"
+    # test -- and would have quietly weakened every dependency hypothesis.
+    for event in events:
+        if event.type in (EventType.RUNTIME_FETCH, EventType.RUNTIME_XHR):
+            if event.payload.get("evidence_reduced"):
+                continue          # out of scope: not our application's endpoint
+            key = endpoint_key_for_request(event.payload, endpoints)
+            if key:
+                mapping[event.event_id] = key
     return mapping
 
 
