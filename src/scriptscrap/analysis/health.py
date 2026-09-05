@@ -49,10 +49,14 @@ class SensorHealth:
     status: str
     reasons: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
+    # A whole FAMILY of evidence this sensor should have produced and did not.
+    # Distinct from `reasons`, which covers lossy-but-working sensors.
+    blind_spots: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {"sensor": self.name, "status": self.status,
-                "reasons": self.reasons, "metrics": self.metrics}
+                "reasons": self.reasons, "metrics": self.metrics,
+                "blind_spots": self.blind_spots}
 
 
 @dataclass(slots=True)
@@ -84,6 +88,11 @@ class HealthAnalyzer:
         by_type: dict[EventType, int] = defaultdict(int)
         by_source: dict[Source, int] = defaultdict(int)
 
+        # A count Playwright can supply and the runtime probe cannot fake: how
+        # much in-scope xhr/fetch traffic actually happened. It is the only
+        # honest denominator for "did the probe's network hooks bind?".
+        xhr_fetch_requests = 0
+
         for event in events:
             by_type[event.type] += 1
             by_source[event.source] += 1
@@ -91,6 +100,9 @@ class HealthAnalyzer:
                 gaps[str(event.payload.get("reason", "unknown"))] += 1
             elif event.type is EventType.SENSOR_ERROR:
                 errors[str(event.payload.get("where", "unknown"))] += 1
+            elif (event.type is EventType.HTTP_REQUEST
+                  and event.payload.get("resource_type") in ("xhr", "fetch")):
+                xhr_fetch_requests += 1
 
         if forensic is None:
             forensic = by_type[EventType.FORENSIC_SENSOR_STARTED] > 0 or any(
@@ -99,7 +111,7 @@ class HealthAnalyzer:
 
         sensors = [
             self._playwright(by_type, errors),
-            self._runtime(by_type, by_source, gaps, errors),
+            self._runtime(by_type, by_source, gaps, errors, xhr_fetch_requests),
             self._dom(by_type, errors),
             self._websocket(by_type, gaps),
             self._storage(by_type, gaps, errors),
@@ -133,7 +145,18 @@ class HealthAnalyzer:
                              "responses": by_type[EventType.HTTP_RESPONSE],
                              "failed": by_type[EventType.HTTP_FAILED]})
 
-    def _runtime(self, by_type, by_source, gaps, errors) -> SensorHealth:
+    def _runtime(self, by_type, by_source, gaps, errors,
+                 xhr_fetch_requests: int = 0) -> SensorHealth:
+        """Coverage, not presence.
+
+        The probe binds two KINDS of instrument: listeners (click, input,
+        MutationObserver, popstate) and monkey-patches (fetch, XHR, sendBeacon,
+        pushState). A browser change that re-isolates the JS world kills every
+        patch while leaving every listener working -- and the old check, which
+        only asked whether ANY runtime event existed, called that healthy while
+        the entire network view was missing. Ask instead whether each family
+        produced evidence when something else says it should have.
+        """
         runtime_events = by_source[Source.RUNTIME]
         if gaps.get("runtime_probe_unavailable"):
             return SensorHealth("runtime_probe", UNAVAILABLE,
@@ -142,17 +165,53 @@ class HealthAnalyzer:
         if not runtime_events:
             return SensorHealth("runtime_probe", UNAVAILABLE,
                                 ["no runtime events reached the collector"])
-        reasons = []
+
+        patched = sum(by_type[t] for t in (
+            EventType.RUNTIME_FETCH, EventType.RUNTIME_XHR,
+            EventType.RUNTIME_BEACON, EventType.RUNTIME_FORM_SUBMIT))
+        listened = sum(by_type[t] for t in (
+            EventType.USER_CLICK, EventType.USER_INPUT,
+            EventType.USER_CHANGE, EventType.USER_SUBMIT))
+
+        reasons: list[str] = []
+        blind_spots: list[str] = []
         drain_failures = sum(v for k, v in errors.items() if "runtime" in k)
         if drain_failures:
             reasons.append(f"{drain_failures} runtime sensor error(s)")
-        return SensorHealth("runtime_probe", DEGRADED if reasons else HEALTHY, reasons,
-                            {"events": runtime_events,
-                             "user_actions": sum(by_type[t] for t in (
-                                 EventType.USER_CLICK, EventType.USER_INPUT,
-                                 EventType.USER_CHANGE, EventType.USER_SUBMIT)),
-                             "runtime_calls": sum(by_type[t] for t in (
-                                 EventType.RUNTIME_FETCH, EventType.RUNTIME_XHR))})
+
+        # The one check with a real correlate. Playwright counted the xhr/fetch
+        # traffic independently, so "the application made 202 requests and the
+        # probe saw none of them" is a measurement, not a heuristic. A weaker
+        # rule (user actions but no DOM mutations) was tried and dropped: a
+        # click that changes nothing is ordinary, so it fired on quiet sessions.
+        if xhr_fetch_requests and not patched:
+            blind_spots.append(
+                f"patched instruments (fetch/XHR/sendBeacon/form submit) produced "
+                f"NOTHING while Playwright observed {xhr_fetch_requests} in-scope "
+                f"xhr/fetch request(s). The patches are not reaching the page -- "
+                f"check JS world isolation and the browser build against the "
+                f"recorded baseline. Call stacks and initiators are missing.")
+        if gaps.get("runtime_main_world_unavailable"):
+            blind_spots.append(
+                "the probe could not be installed in the page's own JS world; "
+                "no runtime network observation was possible")
+        if gaps.get("runtime_patches_not_installed"):
+            blind_spots.append(
+                "some patched instruments did not bind in the page's JS world")
+
+        # A blind spot IS a reason. Every non-healthy status must say why.
+        reasons = blind_spots + reasons
+        status = DEGRADED if reasons else HEALTHY
+        return SensorHealth(
+            "runtime_probe", status, reasons,
+            {"events": runtime_events,
+             "user_actions": listened,
+             "listener_instrument_events": listened + by_type[EventType.DOM_MUTATION],
+             "patched_instrument_events": patched,
+             "playwright_xhr_fetch_requests": xhr_fetch_requests,
+             "runtime_calls": sum(by_type[t] for t in (
+                 EventType.RUNTIME_FETCH, EventType.RUNTIME_XHR))},
+            blind_spots)
 
     def _dom(self, by_type, errors) -> SensorHealth:
         snapshots = by_type[EventType.DOM_SNAPSHOT]
@@ -241,12 +300,21 @@ class HealthAnalyzer:
         if not considered:
             return UNKNOWN
         statuses = {s.status for s in considered}
+
+        # These are different claims and a session can be all of them at once,
+        # so they are composed rather than ranked. Ranking hid the worst one:
+        # a sensor that RAN and lost an evidence family is the deceptive case,
+        # and it was being masked by a sensor that plainly never started.
+        parts: list[str] = []
+        if any(s.blind_spots for s in considered):
+            parts.append("SENSOR BLIND SPOT")
         if UNAVAILABLE in statuses:
-            # A whole sensor missing is a different claim from a lossy one.
-            return "PARTIAL / SENSOR UNAVAILABLE"
-        if DEGRADED in statuses:
-            return "PARTIAL / HIGH COVERAGE"
-        return "COMPLETE / ALL SENSORS HEALTHY"
+            parts.append("SENSOR UNAVAILABLE")
+        if not parts and DEGRADED in statuses:
+            parts.append("HIGH COVERAGE")
+        if not parts:
+            return "COMPLETE / ALL SENSORS HEALTHY"
+        return "PARTIAL / " + " + ".join(parts)
 
     @staticmethod
     def _notes(gaps, by_type, reconciliation) -> list[str]:
@@ -262,6 +330,15 @@ class HealthAnalyzer:
                     f"other sensors could not observe")
             else:
                 notes.append(f"{count} activity/activities seen only by {sensor}")
+        # Zero conflicts reads as agreement. With zero multi-sensor activities
+        # it means the opposite: only one sensor ever spoke, so nothing was
+        # cross-checked. This line is what the first real capture needed and
+        # did not get.
+        if reconciliation.get("activities") and not reconciliation.get("multi_sensor"):
+            notes.append(
+                f"WARNING: none of the {reconciliation['activities']} reconciled "
+                f"activity/activities was seen by more than one sensor, so no "
+                f"claim in this session was cross-checked")
         if reconciliation.get("conflicts"):
             notes.append(
                 f"{reconciliation['conflicts']} sensor conflict(s); both claims preserved")

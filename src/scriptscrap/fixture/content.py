@@ -62,6 +62,11 @@ function fixtureEarlyFunction(a, b) {
 }
 window.fixtureEarlyFunction = fixtureEarlyFunction;
 window.__fixtureEarlyResult = fixtureEarlyFunction(20, 22);
+/* Mirrored into the DOM so a driver in either JS world can wait on it. */
+try {
+  document.documentElement.setAttribute(
+    "data-fixture-early-result", String(window.__fixtureEarlyResult));
+} catch (e) { /* documentElement may not exist yet in some load orders */ }
 
 function fixtureLateFunction(a, b) {
   return a * b;
@@ -469,6 +474,12 @@ window.recalculerFixture = recalculerFixture;
     enregistrerHandlersJQuery();
     peuplerGarages();
     window.__fixtureReady = true;
+    /* Readiness is also published to the DOM, because the DOM is the only
+       thing a driver can see from EITHER JavaScript world. A `window` global
+       is invisible to an isolated-world `wait_for_function`, which is how a
+       browser update silently turned every readiness wait in the harness into
+       a 30-second timeout. */
+    document.documentElement.setAttribute("data-fixture-ready", "true");
   }
 
   /* ---------------------------------------------------------------- *

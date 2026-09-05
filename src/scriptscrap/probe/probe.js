@@ -1,9 +1,36 @@
 /*
  * ScriptScrap runtime probe.
  *
- * Injected at document_start into every frame of every page. It observes user
- * actions, the browser APIs that trigger network activity, SSE streams and DOM
- * mutations, and streams them to Python in batches.
+ * Observes user actions, the browser APIs that trigger network activity, SSE
+ * streams and DOM mutations, and streams them to Python in batches.
+ *
+ * TWO ROLES, ONE FILE
+ * -------------------
+ * Firefox runs injected scripts in an ISOLATED JavaScript world: the DOM is
+ * shared with the page, but `window` is not. That distinction decides what can
+ * observe what, and it is not stable across browser builds -- a Camoufox update
+ * from 152.0.4-beta.28 to beta.29 turned isolation back on and silently killed
+ * every monkey-patched instrument here while every listener kept working. A
+ * whole capture reported no fetch, no XHR, no beacons and no pushState, and
+ * looked healthy doing it.
+ *
+ * So the probe is split by what each technique NEEDS, and the split is
+ * explicit rather than assumed:
+ *
+ *   role "isolated"  (injected via add_init_script at document_start)
+ *       Listeners on the shared DOM -- click, input, change, submit, keydown,
+ *       MutationObserver, popstate -- plus the transport: the exposed binding
+ *       lives in this world, so this is the only role that can reach Python.
+ *
+ *   role "main"      (injected via a `mw:` evaluate into the page's own world)
+ *       The monkey-patches -- fetch, XMLHttpRequest, sendBeacon, form submit,
+ *       pushState/replaceState, EventSource, Storage -- which only work if
+ *       they replace the globals the APPLICATION calls. It cannot reach the
+ *       binding, so it hands each record to the isolated role over a
+ *       CustomEvent on the shared document, as a JSON string.
+ *
+ * The roles install disjoint instruments, so when a browser does NOT isolate
+ * worlds and both run in the same window, nothing is observed twice.
  *
  * THE PRIME DIRECTIVE: the observer must never become the reason the
  * application behaves differently. Every wrapper below therefore:
@@ -22,9 +49,6 @@
 (() => {
   "use strict";
 
-  if (window.__scriptscrapProbeInstalled) return;
-  window.__scriptscrapProbeInstalled = true;
-
   const CFG = Object.assign(
     {
       maxBuffer: 500,        // events held before a forced flush
@@ -33,21 +57,32 @@
       maxStackFrames: 12,
       maxMutationsPerBatch: 40,
       capturePasswordValues: false,
+      role: "isolated",
     },
     window.__scriptscrapConfig || {}
   );
 
+  const ROLE = CFG.role === "main" ? "main" : "isolated";
+  const IS_MAIN = ROLE === "main";
+
+  // Separate flags: on a browser that does not isolate worlds both roles share
+  // one `window`, and each must still install exactly once.
+  const FLAG = IS_MAIN ? "__scriptscrapMainInstalled" : "__scriptscrapProbeInstalled";
+  if (window[FLAG]) return;
+  window[FLAG] = true;
+
   const BINDING = "__scriptscrapEmit";
+  const BRIDGE_EVENT = "__scriptscrapBridge";
 
   let buffer = [];
   let dropped = 0;
   let ordinal = 0;
-  let flushing = false;
   let timer = null;
 
   // --- transport ---------------------------------------------------------
 
   function flush(sync) {
+    if (IS_MAIN) return;               // the main role owns no transport
     if (!buffer.length) return;
     const binding = window[BINDING];
     if (typeof binding !== "function") return; // not yet exposed
@@ -94,20 +129,41 @@
   };
 
   function emit(type, payload) {
+    if (IS_MAIN) { bridgeSend(mk(type, payload)); return; }
+    accept(mk(type, payload));
+  }
+
+  // Queue an already-built record. Shared by this world's own instruments and
+  // by records arriving from the main world, so both take the same path out.
+  function accept(record) {
     if (buffer.length >= CFG.maxBuffer) {
       dropped++;
       flush(false);
       if (buffer.length >= CFG.maxBuffer) return;
     }
-    buffer.push(mk(type, payload));
-    if (buffer.length >= CFG.maxBuffer || FAST_FLUSH[type]) flush(false);
+    buffer.push(record);
+    if (buffer.length >= CFG.maxBuffer || FAST_FLUSH[record.type]) flush(false);
     else schedule();
+  }
+
+  // Main -> isolated, over the one thing the two worlds share: the DOM. The
+  // payload is a JSON STRING, not an object, so no cross-world wrapper can
+  // change what arrives.
+  function bridgeSend(record) {
+    try {
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENT, {
+        detail: JSON.stringify(record),
+      }));
+    } catch (e) { /* a record that cannot cross is lost, not fatal */ }
   }
 
   function mk(type, payload) {
     return {
       type: type,
       ordinal: ++ordinal,
+      // Which world observed this. The two roles count ordinals independently,
+      // so an ordinal is only comparable within one world.
+      world: ROLE,
       t_page: nowMs(),
       url: location.href,
       frame_url: location.href,
@@ -162,6 +218,13 @@
       });
       Object.defineProperty(wrapper, "length", {
         value: original.length, configurable: true,
+      });
+      // Not enumerable, so it stays invisible to `Object.keys` and to any page
+      // that walks its own globals -- but readable by the driver's self-test,
+      // which is the only way to PROVE a patch reached the application's world
+      // rather than assume it from the absence of an error.
+      Object.defineProperty(wrapper, "__scriptscrapWrapped", {
+        value: true, enumerable: false, configurable: true,
       });
     } catch (e) { /* non-fatal */ }
     return wrapper;
@@ -374,23 +437,37 @@
     ["submit", "user_submit"],
   ];
 
-  for (const [dom, mapped] of USER_EVENTS) {
-    // Capture phase, so the observation happens even if the application stops
-    // propagation. Passive where allowed so the listener cannot delay the page.
-    document.addEventListener(dom, (ev) => onUserEvent(mapped, ev), {
-      capture: true,
-      passive: dom !== "submit",
-    });
+  if (!IS_MAIN) {
+    for (const [dom, mapped] of USER_EVENTS) {
+      // Capture phase, so the observation happens even if the application stops
+      // propagation. Passive where allowed so the listener cannot delay the page.
+      document.addEventListener(dom, (ev) => onUserEvent(mapped, ev), {
+        capture: true,
+        passive: dom !== "submit",
+      });
+    }
+
+    document.addEventListener("keydown", (ev) => {
+      // Only keys that carry workflow meaning. Not every keystroke.
+      if (ev.key === "Enter" || ev.key === "Escape" || ev.key === "Tab") {
+        onUserEvent("user_key", ev);
+      }
+    }, { capture: true, passive: true });
+
+    // Records observed in the page's own world arrive here.
+    document.addEventListener(BRIDGE_EVENT, (ev) => {
+      guard("bridge_receive", () => {
+        const record = JSON.parse(ev.detail);
+        if (record && typeof record.type === "string") accept(record);
+      });
+    }, { capture: true });
   }
 
-  document.addEventListener("keydown", (ev) => {
-    // Only keys that carry workflow meaning. Not every keystroke.
-    if (ev.key === "Enter" || ev.key === "Escape" || ev.key === "Tab") {
-      onUserEvent("user_key", ev);
-    }
-  }, { capture: true, passive: true });
-
   // --- network-triggering runtime APIs -----------------------------------
+  // Everything from here to the end of the Storage section replaces globals
+  // the APPLICATION calls, so it only does anything useful in the page's own
+  // world. In the isolated world it would patch a `window` nobody uses.
+  if (IS_MAIN) {
 
   function bodyInfo(body) {
     try {
@@ -542,7 +619,8 @@
     }
   }
 
-  // SPA route changes
+  // SPA route changes. The two halves need different worlds: pushState and
+  // replaceState are patches, popstate is a listener.
   if (window.history) {
     for (const hname of ["pushState", "replaceState"]) {
       const original = history[hname];
@@ -559,11 +637,6 @@
         return original.apply(this, arguments);
       }, original);
     }
-    window.addEventListener("popstate", () => {
-      guard("runtime_history_pop", () => {
-        emit("runtime_history", { via: "popstate", url: location.href, from: null, stack: [] });
-      });
-    }, { passive: true });
   }
 
   // --- EventSource / SSE --------------------------------------------------
@@ -613,6 +686,51 @@
     for (const k of ["CONNECTING", "OPEN", "CLOSED"]) ObservedEventSource[k] = NativeES[k];
     window.EventSource = disguise(ObservedEventSource, NativeES);
   }
+
+  // --- storage writes -----------------------------------------------------
+  guard("storage_hooks", () => {
+    if (!window.Storage || !Storage.prototype) return;
+    const which = (store) => (store === window.sessionStorage ? "sessionStorage" : "localStorage");
+    const nSet = Storage.prototype.setItem;
+    const nRemove = Storage.prototype.removeItem;
+    const nClear = Storage.prototype.clear;
+
+    Storage.prototype.setItem = disguise(function setItem(key, value) {
+      guard("storage_set", () => emit("storage_change", {
+        store: which(this), op: "set", key: String(key),
+        value_length: value == null ? 0 : String(value).length,
+        value: clip(String(value)),
+      }));
+      return nSet.apply(this, arguments);
+    }, nSet);
+
+    Storage.prototype.removeItem = disguise(function removeItem(key) {
+      guard("storage_remove", () => emit("storage_change", {
+        store: which(this), op: "remove", key: String(key),
+      }));
+      return nRemove.apply(this, arguments);
+    }, nRemove);
+
+    Storage.prototype.clear = disguise(function clear() {
+      guard("storage_clear", () => emit("storage_change", { store: which(this), op: "clear" }));
+      return nClear.apply(this, arguments);
+    }, nClear);
+  });
+
+  // A marker the driver can assert from Python: proof the patches landed in
+  // the world the application actually calls, instead of assuming they did.
+  window.__scriptscrapPatched = {
+    fetch: !!(window.fetch && window.fetch.__scriptscrapWrapped),
+    xhr_send: !!(window.XMLHttpRequest && XMLHttpRequest.prototype
+                 && XMLHttpRequest.prototype.send
+                 && XMLHttpRequest.prototype.send.__scriptscrapWrapped),
+    history: !!(window.history && history.pushState
+                && history.pushState.__scriptscrapWrapped),
+    storage: !!(window.Storage && Storage.prototype && Storage.prototype.setItem
+                && Storage.prototype.setItem.__scriptscrapWrapped),
+  };
+
+  }  // end role "main"
 
   // --- DOM mutations ------------------------------------------------------
   // Emitted as bounded batches rather than accumulated in a page-side array,
@@ -664,63 +782,45 @@
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", startObserver, { once: true });
-  } else {
-    startObserver();
-  }
-
-  // --- storage writes -----------------------------------------------------
-  guard("storage_hooks", () => {
-    if (!window.Storage || !Storage.prototype) return;
-    const which = (store) => (store === window.sessionStorage ? "sessionStorage" : "localStorage");
-    const nSet = Storage.prototype.setItem;
-    const nRemove = Storage.prototype.removeItem;
-    const nClear = Storage.prototype.clear;
-
-    Storage.prototype.setItem = disguise(function setItem(key, value) {
-      guard("storage_set", () => emit("storage_change", {
-        store: which(this), op: "set", key: String(key),
-        value_length: value == null ? 0 : String(value).length,
-        value: clip(String(value)),
-      }));
-      return nSet.apply(this, arguments);
-    }, nSet);
-
-    Storage.prototype.removeItem = disguise(function removeItem(key) {
-      guard("storage_remove", () => emit("storage_change", {
-        store: which(this), op: "remove", key: String(key),
-      }));
-      return nRemove.apply(this, arguments);
-    }, nRemove);
-
-    Storage.prototype.clear = disguise(function clear() {
-      guard("storage_clear", () => emit("storage_change", { store: which(this), op: "clear" }));
-      return nClear.apply(this, arguments);
-    }, nClear);
-  });
-
-  // --- lifecycle flushes --------------------------------------------------
-  // The fix for M1's biggest data-loss problem: everything observed before a
-  // navigation is pushed out before the document is torn down.
-  window.addEventListener("pagehide", () => {
-    guard("pagehide_flush", () => { flushMutations(); flush(true); });
-  }, { capture: true });
-
-  window.addEventListener("beforeunload", () => {
-    guard("beforeunload_flush", () => { flushMutations(); flush(true); });
-  }, { capture: true });
-
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") {
-      guard("visibility_flush", () => { flushMutations(); flush(true); });
+  if (!IS_MAIN) {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", startObserver, { once: true });
+    } else {
+      startObserver();
     }
-  }, { capture: true });
 
-  // Python calls this to drain anything still buffered.
-  window.__scriptscrapDrain = function () {
-    flushMutations();
-    flush(true);
-    return true;
-  };
+    // popstate is a LISTENER, so it belongs with the shared-DOM half. Its
+    // partner patches (pushState/replaceState) live in the main role. When
+    // this fired and they did not, that asymmetry was the clearest single
+    // signal that world isolation had come back.
+    window.addEventListener("popstate", () => {
+      guard("runtime_history_pop", () => {
+        emit("runtime_history", { via: "popstate", url: location.href, from: null, stack: [] });
+      });
+    }, { passive: true });
+
+    // --- lifecycle flushes ------------------------------------------------
+    // The fix for M1's biggest data-loss problem: everything observed before a
+    // navigation is pushed out before the document is torn down.
+    window.addEventListener("pagehide", () => {
+      guard("pagehide_flush", () => { flushMutations(); flush(true); });
+    }, { capture: true });
+
+    window.addEventListener("beforeunload", () => {
+      guard("beforeunload_flush", () => { flushMutations(); flush(true); });
+    }, { capture: true });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        guard("visibility_flush", () => { flushMutations(); flush(true); });
+      }
+    }, { capture: true });
+
+    // Python calls this to drain anything still buffered.
+    window.__scriptscrapDrain = function () {
+      flushMutations();
+      flush(true);
+      return true;
+    };
+  }
 })();

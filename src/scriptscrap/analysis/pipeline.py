@@ -177,6 +177,16 @@ def _findings(events: list[Event], result: AnalysisResult) -> list[Finding]:
             count=len(ids), evidence=Evidence(event_ids=ids[:20]),
         ))
 
+    # A sensor that ran but lost a whole evidence family. This outranks every
+    # other finding: it says a conclusion you are about to draw rests on
+    # evidence nobody collected.
+    for sensor in (result.health or {}).get("sensors", []):
+        for blind_spot in sensor.get("blind_spots", []):
+            findings.append(Finding(
+                kind="sensor_blind_spot", severity="critical",
+                message=f"{sensor['sensor']}: {blind_spot}", count=1,
+            ))
+
     thin = [s for s in result.schemas if s.sample_count < 3]
     if thin:
         findings.append(Finding(

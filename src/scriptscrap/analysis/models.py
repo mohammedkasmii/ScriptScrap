@@ -83,12 +83,20 @@ class SchemaField:
 
     path: str
     types: dict[str, int]           # observed type -> count
-    present_count: int
+    present_count: int              # BODIES the path appeared in: <= sample_count
     sample_count: int
     null_count: int = 0
+    # Every value seen. For a path inside an array this exceeds present_count,
+    # and the excess is array cardinality, not extra samples.
+    occurrence_count: int = 0
     enum_candidate: list[str] | None = None
     inferred_format: str | None = None
     examples: list[Any] = field(default_factory=list)
+
+    @property
+    def values_per_body(self) -> float:
+        """Average values seen per body the path appeared in; >1 means an array."""
+        return self.occurrence_count / self.present_count if self.present_count else 0.0
 
     @property
     def inferred_type(self) -> str:

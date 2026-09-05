@@ -52,6 +52,7 @@ async def run_forensic_investigation(
             "geoip": False,
             "enable_cache": False,
             "exclude_addons": [DefaultAddons.UBO],
+            "main_world_eval": True,
         }
         # Must run BEFORE launch: the extension is built with the transport
         # port baked in, and a background script takes no arguments.
@@ -67,13 +68,16 @@ async def run_forensic_investigation(
                     engine.extension_transport.wait_for_connection(timeout=15)
 
                 await page.goto(base + "/", wait_until="load")
-                await page.wait_for_function("window.__fixtureReady === true")
+                # DOM markers rather than page globals: an isolated-world
+                # driver shares the document but not `window`.
+                await page.wait_for_selector("html[data-fixture-ready='true']",
+                                             state="attached")
 
                 # Early-script case: source is observable even though the call
                 # already happened during parse.
                 await page.add_script_tag(url="/api/early.js")
-                await page.wait_for_function(
-                    "typeof window.__fixtureEarlyResult !== 'undefined'")
+                await page.wait_for_selector("html[data-fixture-early-result]",
+                                             state="attached")
 
                 # Bodies: normal, oversized, and a duplicate pair.
                 await page.evaluate("""async () => {

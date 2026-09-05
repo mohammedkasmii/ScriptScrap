@@ -815,7 +815,7 @@
       "session_start": 1,
       "storage_snapshot": 1,
       "user_change": 4,
-      "user_click": 20,
+      "user_click": 22,
       "user_input": 8,
       "user_submit": 1
     },
@@ -869,8 +869,10 @@
         "user_change",
         "user_input",
         "user_change",
+        "user_click",
         "user_input",
         "user_change",
+        "user_click",
         "user_input",
         "user_input",
         "user_click",
@@ -1066,7 +1068,7 @@
           "requestBody": {
             "content": {
               "application/x-www-form-urlencoded": {
-                "example": "nom=Alice%20Benali&ville=mar&__RequestVerificationToken=FIXTURE_CSRF_TOKEN_0001",
+                "example": "nom=Alice%20Benali&ville=mar&__RequestVerificationToken=<redacted: credential, 23 chars>",
                 "schema": {
                   "type": "object"
                 }
@@ -1079,7 +1081,7 @@
                 "application/json": {
                   "example": {
                     "received": {
-                      "__RequestVerificationToken": "FIXTURE_CSRF_TOKEN_0001",
+                      "__RequestVerificationToken": "<redacted: credential, 23 chars>",
                       "nom": "Alice Benali",
                       "ville": "mar"
                     },
@@ -1731,6 +1733,7 @@
         "geoip": false,
         "headless": true,
         "humanize": false,
+        "main_world_eval": true,
         "os": "windows"
       },
       "note": "Camoufox installs uBlock Origin as a default addon unless exclude_addons is passed. It is excluded here so the capture reflects the application's real requests. If this says an addon filter WAS active, the evidence in this session is incomplete."
@@ -1741,6 +1744,9 @@
       "methods_excluded": [
         "OPTIONS"
       ],
+      "openapi_credential_values_removed": 2,
+      "out_of_scope_frame_hosts": {},
+      "out_of_scope_frame_scans": 0,
       "request_routing_active": false,
       "request_samples_per_endpoint": 2,
       "resource_types_captured": [
@@ -1772,6 +1778,7 @@
       "visual_traces": 3
     },
     "environment": {
+      "browser_build_baseline": "<PINNED>",
       "camoufox_browser_build": "<PINNED>",
       "camoufox_lib": "<PINNED>",
       "platform": "<PINNED>",
@@ -1854,6 +1861,14 @@
         "batches": "<TRANSPORT>",
         "events_ingested": "<TRANSPORT>",
         "installed": true,
+        "main_world_failures": 0,
+        "main_world_installs": 7,
+        "main_world_verified": {
+          "fetch": true,
+          "history": true,
+          "storage": true,
+          "xhr_send": true
+        },
         "unknown_types": []
       },
       "storage": {

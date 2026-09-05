@@ -34,11 +34,15 @@ async def _run(tmp_path):
         async with AsyncCamoufox(
             headless=True, humanize=False, os="windows", geoip=False,
             exclude_addons=[DefaultAddons.UBO],
+            main_world_eval=True,
         ) as browser:
             page = await browser.new_page()
             await inv.attach_engine_to_page(page, engine)
             await page.goto(fx.base_url + "/", wait_until="load")
-            await page.wait_for_function("window.__fixtureReady === true")
+            # DOM, not a page global: the driver may be in the isolated world,
+            # which shares the document but not `window`.
+            await page.wait_for_selector("html[data-fixture-ready='true']",
+                                         state="attached")
 
             # -- user actions -----------------------------------------
             await page.fill("#nom", "Alice Benali")
@@ -216,15 +220,32 @@ def test_runtime_call_and_network_request_share_a_join_key(log):
     assert runtime.frame_id == request.frame_id
 
 
-def test_probe_ordinals_are_monotonic_within_a_frame(log):
-    """In-page ordering is recoverable even though ingest order is not."""
-    by_frame: dict[str, list[int]] = {}
+def test_probe_ordinals_are_monotonic_within_a_frame_and_world(log):
+    """In-page ordering is recoverable even though ingest order is not.
+
+    The scope of that guarantee is one frame in one JS WORLD. The probe runs in
+    two -- listeners in the isolated world, patched instruments in the page's
+    own -- and each counts its own ordinals. Comparing them across worlds is
+    the same mistake as comparing `seq` across sensors, so the join key
+    includes `probe_world`.
+    """
+    by_frame_world: dict[tuple[str, str], list[int]] = {}
+    worlds: set[str] = set()
     for event in log:
         if event.source is Source.RUNTIME and event.payload.get("probe_ordinal"):
-            by_frame.setdefault(event.frame_id or "?", []).append(event.payload["probe_ordinal"])
-    assert by_frame, "no probe events carried an ordinal"
-    for frame_id, ordinals in by_frame.items():
-        assert ordinals == sorted(ordinals), f"probe ordinals out of order in {frame_id}"
+            world = event.payload.get("probe_world") or "isolated"
+            worlds.add(world)
+            by_frame_world.setdefault(
+                (event.frame_id or "?", world), []
+            ).append(event.payload["probe_ordinal"])
+
+    assert by_frame_world, "no probe events carried an ordinal"
+    assert worlds == {"isolated", "main"}, (
+        f"expected evidence from both probe roles, got {sorted(worlds)}. "
+        "A missing 'main' means the patched instruments never reached the page.")
+    for (frame_id, world), ordinals in by_frame_world.items():
+        assert ordinals == sorted(ordinals), (
+            f"probe ordinals out of order in {frame_id} / {world} world")
 
 
 def test_history_api_is_observed(log):

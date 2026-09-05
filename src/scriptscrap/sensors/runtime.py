@@ -19,7 +19,13 @@ import json
 from typing import Any
 
 from ..events import EventType, Source
-from ..probe import BINDING_NAME, DRAIN_FUNCTION, build_init_script
+from ..probe import (
+    BINDING_NAME,
+    DRAIN_FUNCTION,
+    PATCH_MARKER,
+    build_init_script,
+    build_main_world_script,
+)
 from .identity import PageRegistry
 
 # Probe record type -> spine event type. A record whose type is not here is
@@ -64,6 +70,10 @@ class RuntimeSensor:
         self.batches = 0
         self.unknown_types: set[str] = set()
         self._installed = False
+        self.main_world_installs = 0
+        self.main_world_failures = 0
+        self.main_world_verified: dict[str, bool] | None = None
+        self._main_world_reported = False
 
     async def attach(self, context: Any) -> None:
         """Expose the binding and inject the probe for every page in the context."""
@@ -79,6 +89,80 @@ class RuntimeSensor:
                 "runtime_probe_unavailable",
                 note="no user actions, runtime stacks, SSE or storage writes will be observed",
             )
+
+    # -- main world ---------------------------------------------------------
+    async def install_main_world(self, frame: Any) -> dict[str, bool] | None:
+        """Install the patch half in the page's OWN JavaScript world.
+
+        `add_init_script` lands in the isolated world, where patching `fetch`
+        changes a global no application ever calls. Camoufox exposes the real
+        world only through `evaluate("mw:" + script)`, which cannot run at
+        document_start -- so this is called on every navigation, as early as
+        the driver is allowed to run anything, and is idempotent.
+
+        Returns the patch marker the page reports back, or None on failure.
+        """
+        try:
+            marker = await frame.evaluate(
+                "mw:" + build_main_world_script(self.config))
+        except Exception as exc:
+            self.main_world_failures += 1
+            # Reported once: a page with many frames would otherwise bury the
+            # rest of the log in the same failure.
+            if not self._main_world_reported:
+                self._main_world_reported = True
+                self.engine.emit_sensor_error("runtime_main_world_install", exc)
+                self.engine.emit_capture_gap(
+                    "runtime_main_world_unavailable",
+                    error=str(exc),
+                    note=("the probe's patched instruments (fetch, XHR, sendBeacon, "
+                          "form submit, pushState) could not be installed in the "
+                          "page's own JS world. No runtime network observation, "
+                          "call stacks or initiators will be recorded. Check that "
+                          "the browser was launched with main_world_eval=True."),
+                )
+            return None
+
+        if isinstance(marker, dict):
+            self.main_world_installs += 1
+            self.main_world_verified = marker
+            missing = sorted(k for k, v in marker.items() if not v)
+            if missing and not self._main_world_reported:
+                self._main_world_reported = True
+                self.engine.emit_capture_gap(
+                    "runtime_patches_not_installed",
+                    missing=missing,
+                    note=("the main-world script ran but these instruments did not "
+                          "bind; the APIs they wrap will not be observed"),
+                )
+        return marker if isinstance(marker, dict) else None
+
+    async def verify_main_world(self, frame: Any) -> dict[str, Any]:
+        """Read the patch marker back from the page. The runtime self-test.
+
+        The first real capture reported `runtime_probe healthy` while every
+        patched instrument was silent, because nothing ever asked the page
+        whether the patches were actually there. This asks.
+        """
+        result: dict[str, Any] = {"checked": True}
+        try:
+            result["marker"] = await frame.evaluate(
+                f"mw:window.{PATCH_MARKER} || null")
+        except Exception as exc:
+            result["marker"] = None
+            result["error"] = f"{type(exc).__name__}: {exc}"
+        marker = result.get("marker")
+        result["ok"] = bool(marker) and all(marker.values())
+        if not result["ok"]:
+            self.engine.emit_capture_gap(
+                "runtime_patch_verification_failed",
+                marker=marker,
+                error=result.get("error"),
+                note=("the page's own JS world does not report ScriptScrap's "
+                      "patches. Runtime network evidence from this session is "
+                      "missing, not absent."),
+            )
+        return result
 
     def _on_batch(self, binding_source: dict, raw: str) -> bool:
         """Playwright binding callback. Must never raise into the page."""
@@ -117,6 +201,10 @@ class RuntimeSensor:
         # The probe's own clock and ordering are preserved as evidence; the
         # spine's `seq` remains the authoritative order.
         payload["probe_ordinal"] = record.get("ordinal")
+        # Which JS world observed it. The two roles count ordinals separately,
+        # so `probe_ordinal` is only comparable within one world -- the same
+        # rule that applies to `seq` across sensors.
+        payload["probe_world"] = record.get("world") or "isolated"
         payload["probe_time_ms"] = record.get("t_page")
         payload["frame_url"] = record.get("frame_url")
         payload["is_top_frame"] = record.get("is_top")
@@ -145,4 +233,7 @@ class RuntimeSensor:
             "batches": self.batches,
             "events_ingested": self.received,
             "unknown_types": sorted(self.unknown_types),
+            "main_world_installs": self.main_world_installs,
+            "main_world_failures": self.main_world_failures,
+            "main_world_verified": self.main_world_verified,
         }

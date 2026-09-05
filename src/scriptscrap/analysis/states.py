@@ -13,18 +13,13 @@ record viewed would look like a different state and the graph would be a list.
 from __future__ import annotations
 
 import hashlib
-import re
 from collections import defaultdict
 from datetime import datetime
 from urllib.parse import urlparse
 
 from ..events import Event, EventType
+from .identifiers import identifier_kind
 from .models import AppState, Evidence, StateTransition
-
-# Path segments replaced before a route is used as identity.
-_NUMERIC = re.compile(r"^\d+$")
-_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-_CODE = re.compile(r"^[A-Za-z]{1,12}[-_][A-Za-z0-9-]{2,}$")
 
 # Events that can plausibly cause a state change.
 TRIGGER_TYPES = (
@@ -48,15 +43,12 @@ def route_shape(url: str) -> str:
     for segment in (parsed.path or "/").split("/"):
         if not segment:
             continue
-        if _NUMERIC.match(segment) or _UUID.match(segment) or _CODE.match(segment):
-            segments.append("{id}")
-        else:
-            segments.append(segment)
+        segments.append("{id}" if identifier_kind(segment) else segment)
     shape = "/" + "/".join(segments)
     # A hash route is structure in an SPA, so its shape is kept too.
     if parsed.fragment:
         fragment_segments = [
-            "{id}" if (_NUMERIC.match(s) or _CODE.match(s)) else s
+            "{id}" if identifier_kind(s) else s
             for s in parsed.fragment.split("/") if s
         ]
         if fragment_segments:

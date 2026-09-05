@@ -80,6 +80,9 @@ async def run_scripted_investigation(
             "geoip": False,
             "enable_cache": False,  # a cached response produces no network evidence
             "exclude_addons": [DefaultAddons.UBO],
+            # Same as the interactive entry point: without this the probe's
+            # patched instruments never reach the page's own JS world.
+            "main_world_eval": True,
         }
         engine.record_launch_options(launch_options)
 

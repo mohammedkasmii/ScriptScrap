@@ -38,6 +38,10 @@ async def _run(tmp_path) -> tuple[int, EventLogReader]:
         async with AsyncCamoufox(
             headless=True, humanize=False, os="windows", geoip=False,
             exclude_addons=[DefaultAddons.UBO],
+            # attach_engine_to_page installs the probe's patched half through a
+            # main-world evaluate. Without this the browser refuses it and the
+            # sensor correctly reports a blind spot.
+            main_world_eval=True,
         ) as browser:
             page = await browser.new_page()
             await inv.attach_engine_to_page(page, engine)

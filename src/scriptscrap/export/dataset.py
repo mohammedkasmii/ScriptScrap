@@ -90,6 +90,7 @@ class DatasetExporter:
                     "fields": [
                         {"path": f.path, "inferred_type": f.inferred_type,
                          "present": f"{f.present_count}/{f.sample_count}",
+                         "occurrence_count": f.occurrence_count,
                          "observed_optional": f.observed_optional,
                          "null_count": f.null_count,
                          "inferred_format": f.inferred_format,

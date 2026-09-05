@@ -428,3 +428,110 @@ def test_findings_report_capture_gaps():
     assert "sensor_error" in findings
     critical = [f for f in analyze_events(events, "s").findings if f.severity == "critical"]
     assert critical, "a service-worker gap must be critical"
+
+
+# --- real-world capture regressions -------------------------------------
+# Each of these encodes a defect found by auditing the first capture against a
+# live external site, where synthetic fixtures had produced too little repeated
+# traffic for the bug to show.
+
+def test_status_counts_are_not_multiplied_by_request_count():
+    """Every response belongs to ONE request.
+
+    The first real capture reported 182 statuses for 14 requests to `/`, which
+    is 14 x 13: each request carried the full status list for its URL, and the
+    endpoint summed it once per request.
+    """
+    events = []
+    for _ in range(4):
+        events.append(req("https://app.test/report"))
+        events.append(resp("https://app.test/report", status=200))
+
+    endpoint = EndpointAnalyzer().analyze(events)[0]
+    assert endpoint.observation_count == 4
+    assert endpoint.statuses == {"200": 4}, endpoint.statuses
+
+
+def test_total_statuses_equal_responses_observed():
+    """The conservation law: nothing invented, nothing dropped."""
+    events = [
+        req("https://app.test/a"), resp("https://app.test/a", 200),
+        req("https://app.test/a"), resp("https://app.test/a", 304),
+        req("https://app.test/a"), resp("https://app.test/a", 304),
+        req("https://app.test/b"), resp("https://app.test/b", 500),
+    ]
+    endpoints = EndpointAnalyzer().analyze(events)
+    total = sum(sum(e.statuses.values()) for e in endpoints)
+    assert total == 4
+    by_key = {e.key: e.statuses for e in endpoints}
+    assert by_key["GET /a"] == {"200": 1, "304": 2}
+
+
+def test_an_unanswered_request_contributes_no_status():
+    events = [req("https://app.test/hang"), req("https://app.test/hang"),
+              resp("https://app.test/hang", 200)]
+    endpoint = EndpointAnalyzer().analyze(events)[0]
+    assert endpoint.observation_count == 2
+    assert sum(endpoint.statuses.values()) == 1
+
+
+def test_kebab_case_route_names_are_not_identifiers():
+    """The bug that collapsed six real pages into one state.
+
+    A hyphen alone made `/radio-buttons` look like a product code. Route names
+    are hyphenated far more often than identifiers are; a digit is what
+    actually distinguishes them.
+    """
+    for route in ("/radio-buttons", "/drag-and-drop", "/key-presses",
+                  "/add-remove-elements", "/dynamic-id", "/file-upload"):
+        assert route_shape("https://app.test" + route) == route
+
+
+def test_real_identifiers_are_still_templated():
+    assert route_shape("https://app.test/items/4471") == "/items/{id}"
+    assert route_shape("https://app.test/items/ITEM-0001") == "/items/{id}"
+    assert route_shape(
+        "https://app.test/d/3f2504e0-4f89-11d3-9a0c-0305e82c3301") == "/d/{id}"
+
+
+def test_route_shape_and_endpoint_templating_share_one_rule():
+    """The two callers disagreed in effect while sharing a broken regex.
+
+    `states` destroyed six routes; `endpoints` templated nothing, saved only by
+    a sibling-variance gate. One definition now, so a change reaches both.
+    """
+    from scriptscrap.analysis.identifiers import identifier_kind
+
+    assert identifier_kind("radio-buttons") is None
+    assert identifier_kind("ITEM-0001") == "code"
+    assert identifier_kind("4471") == "integer"
+
+
+def test_field_presence_never_exceeds_the_sample_count():
+    """`present 6/1` was an array counted as six samples of one body."""
+    inferrer = SchemaInferrer()
+    inferrer.observe({"cars": [{"id": i, "name": f"car{i}"} for i in range(6)]}, "evt-1")
+    schema = inferrer.build("GET /api/cars", "response")
+
+    assert schema.sample_count == 1
+    fields = {f.path: f for f in schema.fields}
+    element = fields["$.cars[].name"]
+    assert element.present_count == 1, "one body contained it, however many times"
+    assert element.occurrence_count == 6, "array cardinality is kept, separately"
+    assert element.values_per_body == 6.0
+    for field in schema.fields:
+        assert field.present_count <= schema.sample_count
+
+
+def test_optionality_still_works_across_bodies():
+    """The per-body count must not break what the denominator is FOR."""
+    inferrer = SchemaInferrer()
+    inferrer.observe({"id": 1, "note": "x"}, "evt-1")
+    inferrer.observe({"id": 2}, "evt-2")
+    schema = inferrer.build("GET /api/items", "response")
+
+    fields = {f.path: f for f in schema.fields}
+    assert fields["$.id"].present_count == 2
+    assert fields["$.note"].present_count == 1
+    assert fields["$.note"].observed_optional is True
+    assert fields["$.id"].observed_optional is False

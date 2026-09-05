@@ -18,30 +18,17 @@ from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
 from ..events import Event, EventType
+from .identifiers import CODE_RE, LONG_HEX_RE, NUMERIC_RE, UUID_RE, identifier_kind
 from .models import Endpoint, Evidence, ParamObservation
 
-UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-NUMERIC_RE = re.compile(r"^\d+$")
-LONG_HEX_RE = re.compile(r"^[0-9a-f]{16,}$", re.I)
-# e.g. ITEM-0001, M-FIXTURE-0001 -- a prefix plus a varying tail.
-CODE_RE = re.compile(r"^[A-Za-z]{1,12}[-_][A-Za-z0-9-]{2,}$")
+__all__ = ["EndpointAnalyzer", "endpoint_key_for_request",
+           "CODE_RE", "LONG_HEX_RE", "NUMERIC_RE", "UUID_RE"]
 
 # A segment must vary across at least this many sibling paths before it is
 # treated as a parameter. One observation is not a pattern.
 MIN_SIBLINGS_TO_TEMPLATE = 2
 
-
-def _looks_like_identifier(segment: str) -> str | None:
-    """Name the identifier kind, or None if this looks like a fixed route word."""
-    if NUMERIC_RE.match(segment):
-        return "integer"
-    if UUID_RE.match(segment):
-        return "uuid"
-    if LONG_HEX_RE.match(segment):
-        return "hash"
-    if CODE_RE.match(segment):
-        return "code"
-    return None
+_looks_like_identifier = identifier_kind
 
 
 def _infer_scalar_type(value: str) -> str:
@@ -88,15 +75,33 @@ class EndpointAnalyzer:
 
     # -- collection --------------------------------------------------------
     def _collect(self, events: list[Event]) -> tuple[list[dict], list[dict]]:
-        responses: dict[tuple[str, str], list[int]] = defaultdict(list)
+        """Build one record per request, carrying only ITS OWN response statuses.
+
+        A response belongs to exactly one request. Attaching every status seen
+        for a URL to every request to that URL multiplies the counts: a real
+        capture reported 182 statuses for 14 requests to `/`, which is 14 x 13.
+
+        Captures written after this fix carry a `request_id` on both events and
+        pair exactly. Older logs have no such key, so they pair POSITIONALLY --
+        responses for a (method, url) are consumed in arrival order, one per
+        request. Either way the invariant holds: the statuses recorded across
+        all endpoints total the number of responses actually observed.
+        """
+        by_request: dict[str, list[int]] = defaultdict(list)
+        fifo: dict[tuple[str, str], list[int]] = defaultdict(list)
         for event in events:
             if event.type is EventType.HTTP_RESPONSE:
                 payload = event.payload
-                key = (payload.get("method", ""), payload.get("url", ""))
-                responses[key].append(payload.get("status", 0))
+                status = payload.get("status", 0)
+                request_id = payload.get("request_id")
+                if request_id:
+                    by_request[str(request_id)].append(status)
+                else:
+                    fifo[(payload.get("method", ""), payload.get("url", ""))].append(status)
 
         rest: list[dict] = []
         graphql: list[dict] = []
+        last_unkeyed: dict[tuple[str, str], dict] = {}
         for event in events:
             if event.type is not EventType.HTTP_REQUEST:
                 continue
@@ -104,19 +109,38 @@ class EndpointAnalyzer:
             url = payload.get("url") or ""
             method = payload.get("method") or "GET"
             parsed = urlparse(url)
+            request_id = payload.get("request_id")
+
+            if request_id:
+                statuses = by_request.get(str(request_id), [])
+            else:
+                queue = fifo[(method, url)]
+                statuses = [queue.pop(0)] if queue else []
+
             record = {
                 "event_id": event.event_id,
                 "method": method,
                 "url": url,
                 "path": parsed.path or "/",
                 "query": parsed.query,
-                "statuses": responses.get((method, url), []),
+                "statuses": statuses,
                 "graphql": payload.get("graphql"),
             }
             if record["graphql"] and record["graphql"].get("operations"):
                 graphql.append(record)
             else:
                 rest.append(record)
+            if not request_id:
+                last_unkeyed[(method, url)] = record
+
+        # More responses than requests happens legitimately (redirect chains,
+        # requests emitted before the log started). Dropping them would lose
+        # observed evidence, so they land on the last request for that URL and
+        # the total is conserved rather than silently reduced.
+        for key, queue in fifo.items():
+            if queue and (record := last_unkeyed.get(key)) is not None:
+                record["statuses"] = list(record["statuses"]) + queue
+
         return rest, graphql
 
     # -- REST --------------------------------------------------------------

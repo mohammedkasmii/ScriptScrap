@@ -189,3 +189,78 @@ def test_health_explains_why_not_just_what():
     for sensor in health.sensors:
         if sensor.status in ("degraded", "unavailable", "not_applicable"):
             assert sensor.reasons, f"{sensor.name} gave a status with no reason"
+
+
+# --- the blind spot the first real capture hid ---------------------------
+# A browser update re-isolated the JS worlds. Every monkey-patched instrument
+# in the probe went silent; every listener kept working. Health looked at the
+# runtime event COUNT, saw hundreds, and reported `healthy` for a whole
+# capture that had no network observation in it at all.
+
+def _isolated_world_session():
+    """Listener evidence flowing, patched evidence at zero, traffic happening."""
+    events = [ev(EventType.SESSION_START, {})]
+    for i in range(12):
+        events.append(ev(EventType.HTTP_REQUEST,
+                         {"method": "GET", "url": f"{URL}/{i}", "resource_type": "xhr"}))
+        events.append(ev(EventType.HTTP_RESPONSE,
+                         {"method": "GET", "url": f"{URL}/{i}", "status": 200}))
+    for _ in range(30):  # the probe is alive and loud -- on the listener side
+        events.append(ev(EventType.USER_CLICK, {"element": {"tag": "a"}},
+                         source=Source.RUNTIME))
+        events.append(ev(EventType.DOM_MUTATION, {"count": 1}, source=Source.RUNTIME))
+    return events
+
+
+def test_a_silent_instrument_family_is_not_healthy():
+    health = HealthAnalyzer().analyze(_isolated_world_session())
+    runtime = {s.name: s for s in health.sensors}["runtime_probe"]
+
+    assert runtime.status != "healthy", (
+        "hundreds of listener events must not certify a dead patch family")
+    assert runtime.blind_spots, "the missing evidence family was not named"
+    assert "fetch/XHR" in runtime.blind_spots[0]
+    assert runtime.metrics["patched_instrument_events"] == 0
+    assert runtime.metrics["playwright_xhr_fetch_requests"] == 12
+
+
+def test_a_blind_spot_reaches_the_overall_headline():
+    """It must not be hidden behind another sensor's status."""
+    health = HealthAnalyzer().analyze(_isolated_world_session())
+    assert "SENSOR BLIND SPOT" in health.overall
+    assert not health.overall.startswith("COMPLETE")
+
+
+def test_every_non_healthy_sensor_states_a_reason():
+    health = HealthAnalyzer().analyze(_isolated_world_session())
+    for sensor in health.sensors:
+        if sensor.status != "healthy":
+            assert sensor.reasons, f"{sensor.name} gave a status with no reason"
+
+
+def test_patched_evidence_present_is_healthy():
+    """The check must not fire whenever the probe is simply working."""
+    events = _isolated_world_session()
+    events.append(ev(EventType.RUNTIME_FETCH, {"method": "GET", "url": URL},
+                     source=Source.RUNTIME))
+    runtime = {s.name: s for s in HealthAnalyzer().analyze(events).sensors}["runtime_probe"]
+    assert runtime.blind_spots == []
+    assert runtime.status == "healthy"
+
+
+def test_quiet_session_with_no_traffic_is_not_accused():
+    """No xhr/fetch happened, so no patched evidence is EXPECTED."""
+    events = [ev(EventType.SESSION_START, {}),
+              ev(EventType.HTTP_REQUEST,
+                 {"method": "GET", "url": URL, "resource_type": "document"}),
+              ev(EventType.USER_CLICK, {"element": {"tag": "a"}}, source=Source.RUNTIME)]
+    runtime = {s.name: s for s in HealthAnalyzer().analyze(events).sensors}["runtime_probe"]
+    assert runtime.blind_spots == []
+
+
+def test_single_sensor_session_is_called_out_as_uncrosschecked():
+    """Zero conflicts reads as agreement; with zero multi-sensor it is silence."""
+    health = HealthAnalyzer().analyze(_isolated_world_session())
+    warnings = [n for n in health.notes if n.startswith("WARNING")]
+    assert warnings, health.notes
+    assert "more than one sensor" in warnings[0]

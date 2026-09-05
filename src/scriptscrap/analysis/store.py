@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS schema_fields (
     types             TEXT    NOT NULL,
     present_count     INTEGER NOT NULL,
     sample_count      INTEGER NOT NULL,
+    occurrence_count  INTEGER NOT NULL,
     null_count        INTEGER NOT NULL,
     observed_optional INTEGER NOT NULL,
     enum_candidate    TEXT,
@@ -253,11 +254,11 @@ class DerivedStore:
             for f in schema.fields:
                 cur.execute(
                     "INSERT INTO schema_fields (schema_id, path, inferred_type, types,"
-                    " present_count, sample_count, null_count, observed_optional,"
-                    " enum_candidate, inferred_format, examples)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " present_count, sample_count, occurrence_count, null_count,"
+                    " observed_optional, enum_candidate, inferred_format, examples)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (schema_id, f.path, f.inferred_type, _dumps(f.types), f.present_count,
-                     f.sample_count, f.null_count, int(f.observed_optional),
+                     f.sample_count, f.occurrence_count, f.null_count, int(f.observed_optional),
                      _dumps(f.enum_candidate) if f.enum_candidate else None,
                      f.inferred_format, _dumps(f.examples)),
                 )

@@ -39,6 +39,10 @@ CREDENTIAL_NAMES = frozenset({
 CREDENTIAL_SUBSTRINGS = (
     "auth", "token", "secret", "credential", "session", "cookie",
     "apikey", "api-key", "password", "signature", "assertion",
+    # A real capture's login form named its CSRF field `_csrf`, which matched
+    # none of the fully-spelled names above. The bare stem is what actually
+    # appears in the wild.
+    "csrf", "xsrf",
 )
 
 # Value shapes that are credentials wherever they appear.

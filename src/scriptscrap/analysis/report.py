@@ -97,8 +97,9 @@ def render(result: AnalysisResult) -> str:
         lines += [f"### `{title}`", "",
                   f"Root `{schema.root_type}`, {schema.sample_count} sample(s)", ""]
         lines += _table(
-            ["Field", "Type", "Present", "Optional", "Format", "Enum candidate"],
+            ["Field", "Type", "Present", "Values", "Optional", "Format", "Enum candidate"],
             [[f"`{f.path}`", f.inferred_type, f"{f.present_count}/{f.sample_count}",
+              str(f.occurrence_count),
               "yes" if f.observed_optional else "—", f.inferred_format or "—",
               ", ".join(f.enum_candidate[:5]) if f.enum_candidate else "—"]
              for f in schema.fields],

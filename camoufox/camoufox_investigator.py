@@ -10,7 +10,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 from camoufox.addons import DefaultAddons
 from camoufox.async_api import AsyncCamoufox
@@ -469,6 +469,17 @@ class WebHarvester:
         self.out_of_scope = {}
         self.skipped_visual_captures = 0
 
+        # Third-party frames are skipped on every scan. Counting them here and
+        # emitting one aggregate gap per scan keeps the fact without letting an
+        # ad iframe that re-attaches on a timer dominate the event log.
+        self._out_of_scope_frame_scans = 0
+        self._out_of_scope_frame_hosts: dict[str, int] = {}
+
+        # Credential values stripped from the generated OpenAPI examples. A
+        # spec is a shareable artifact; reporting this number makes the claim
+        # checkable instead of implied.
+        self.openapi_credentials_removed = 0
+
         # Snapshot fidelity accounting: a partial offline snapshot must be
         # visible as partial, not silently pass for complete.
         self.snapshot_stats = {
@@ -915,10 +926,62 @@ class WebHarvester:
                 "content": {
                     content_type: {
                         "schema": {"type": "object"},
-                        "example": payload
+                        # A spec is the artifact people hand to a developer.
+                        # The first real capture put the operator's live login
+                        # password into the /authenticate example verbatim,
+                        # because request bodies were copied here without
+                        # passing through the redaction that already protects
+                        # the shared dataset and the generated client.
+                        "example": self._redact_example(payload)
                     }
                 }
             }
+
+    def _redact_example(self, payload):
+        """Strip credential-named fields out of an OpenAPI example.
+
+        The SHAPE is what makes a spec useful -- which fields exist, what type
+        they are -- and that survives. Only the values of credential-named
+        fields are replaced, so the example still shows a developer exactly
+        what to send.
+        """
+        try:
+            from scriptscrap.export.redact import describe_credential, is_credential_name
+        except ImportError:  # pragma: no cover - bare venv without the package
+            return payload
+
+        def scrub(value, depth=0):
+            if depth > 8:
+                return value
+            if isinstance(value, dict):
+                out = {}
+                for key, item in value.items():
+                    if is_credential_name(key):
+                        self.openapi_credentials_removed += 1
+                        out[key] = describe_credential(item)
+                    else:
+                        out[key] = scrub(item, depth + 1)
+                return out
+            if isinstance(value, list):
+                return [scrub(v, depth + 1) for v in value[:20]]
+            return value
+
+        if isinstance(payload, str):
+            # A form body: `username=x&password=y`. Only the credential VALUES
+            # are substituted, in place -- parsing and re-joining the whole
+            # string would decode `%20` back to a space and hand the reader an
+            # example that is no longer a valid urlencoded body.
+            if "=" in payload and "\n" not in payload[:200]:
+                def replace(match):
+                    key, value = match.group(1), match.group(2)
+                    if is_credential_name(unquote_plus(key)):
+                        self.openapi_credentials_removed += 1
+                        return f"{key}={describe_credential(unquote_plus(value))}"
+                    return match.group(0)
+
+                return re.sub(r"([^=&]+)=([^&]*)", replace, payload)
+            return payload
+        return scrub(payload)
 
     def _build_openapi_response(self, method, path, status, payload):
         m_lower = method.lower()
@@ -928,7 +991,9 @@ class WebHarvester:
                 "description": "Auto-captured response",
                 "content": {
                     content_type: {
-                        "example": payload
+                        # Responses carry credentials too: a login endpoint
+                        # answers with the token it just minted.
+                        "example": self._redact_example(payload)
                     }
                 }
             }
@@ -941,14 +1006,12 @@ class WebHarvester:
             return
 
         results = []
+        skipped_hosts: dict[str, int] = {}
         for frame in page.frames:
             # A frame may be third-party even when the top document is in scope.
             if not self.scope.contains(frame.url):
-                self.emit_capture_gap(
-                    "frame_out_of_scope",
-                    host=urlparse(frame.url).hostname,
-                    frame_id=_frame_id_of(frame),
-                )
+                host = urlparse(frame.url).hostname or "(no host)"
+                skipped_hosts[host] = skipped_hosts.get(host, 0) + 1
                 continue
             try:
                 dom = await frame.evaluate(DOM_PROBE_JS)
@@ -957,6 +1020,22 @@ class WebHarvester:
                 # A frame we could not read is a hole, not an empty frame.
                 self.emit_sensor_error(
                     "scan_all_frames", exc, frame_id=_frame_id_of(frame), url=frame.url)
+
+        # One gap per scan naming the hosts, not one per frame per scan. An ad
+        # network that re-attaches its iframe on a timer produced 802 identical
+        # gap events in a six-minute session -- a quarter of the whole log,
+        # saying the same thing 802 times and burying the gaps that mattered.
+        if skipped_hosts:
+            self._out_of_scope_frame_scans += 1
+            for host, count in skipped_hosts.items():
+                self._out_of_scope_frame_hosts[host] = (
+                    self._out_of_scope_frame_hosts.get(host, 0) + count)
+            self.emit_capture_gap(
+                "frame_out_of_scope",
+                hosts=dict(sorted(skipped_hosts.items())),
+                frames_skipped=sum(skipped_hosts.values()),
+                note="third-party frames are not read; scope is enforced per frame",
+            )
 
         self.dom_snapshots.append({"time": datetime.now().isoformat(), "frames": results})
         self.emit_event(
@@ -967,6 +1046,31 @@ class WebHarvester:
             frames_total=len(page.frames),
             forms=sum(len(r["data"].get("forms", [])) for r in results),
         )
+
+    async def _eval_page_world(self, target, expression, *, default=None):
+        """Evaluate an expression against the PAGE's globals, not the driver's.
+
+        `page.evaluate` runs in the isolated world, which shares the document
+        but not `window`. Anything reading a global the application or an
+        injected hook defined must go through Camoufox's `mw:` prefix, and a
+        browser that does not offer it falls back to the plain evaluate rather
+        than losing the reading entirely. A failure is recorded as a gap: an
+        unreadable buffer is not an empty one.
+        """
+        try:
+            return await target.evaluate("mw:" + expression)
+        except Exception as main_world_exc:
+            try:
+                return await target.evaluate(expression)
+            except Exception as exc:
+                self.emit_capture_gap(
+                    "page_world_read_failed",
+                    expression=expression[:120],
+                    main_world_error=str(main_world_exc),
+                    error=str(exc),
+                    note="a page global could not be read in either JS world",
+                )
+                return default
 
     async def extract_active_introspection(self, page):
         """Pulls Hooks, Dropdowns, and jQuery events before closing."""
@@ -991,7 +1095,11 @@ class WebHarvester:
             return dict;
         }""")
 
-        self.jquery_events = await page.evaluate("""() => {
+        # jQuery is a PAGE global, and so are the hook buffers below. Reading
+        # them from the isolated world returns an empty object every time --
+        # which is exactly what the first real capture reported, next to a page
+        # that demonstrably used jQuery.
+        self.jquery_events = await self._eval_page_world(page, """(() => {
             let eventsMap = {};
             if (window.jQuery) {
                 window.jQuery('*').each(function() {
@@ -1003,10 +1111,12 @@ class WebHarvester:
                 });
             }
             return eventsMap;
-        }""")
+        })()""", default={}) or {}
 
-        self.js_hooks = await page.evaluate("window.functionHookLogs || []")
-        self.mutations = await page.evaluate("window.domMutations || []")
+        self.js_hooks = await self._eval_page_world(
+            page, "window.functionHookLogs || []", default=[]) or []
+        self.mutations = await self._eval_page_world(
+            page, "window.domMutations || []", default=[]) or []
 
         self.emit_event(
             EV.Source.RUNTIME,
@@ -1176,6 +1286,18 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
         except Exception as exc:
             browser_build = f"unavailable: {exc}"
 
+        # The browser is not pinned by uv.lock. Recording the build was not
+        # enough -- a reader needs to know whether it is the build the
+        # assumptions were verified against, without going to look it up.
+        browser_baseline = {"status": "unknown", "note": "scriptscrap not importable"}
+        try:
+            from scriptscrap.baseline import compare_browser_build
+            browser_baseline = compare_browser_build(
+                browser_build if isinstance(browser_build, str)
+                and not browser_build.startswith("unavailable") else None)
+        except ImportError:
+            pass
+
         return {
             "schema": "scriptscrap/session-manifest/1",
             "session_id": self.session_id,
@@ -1189,6 +1311,7 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
                 "camoufox_lib": _v("camoufox"),
                 "playwright": _v("playwright"),
                 "camoufox_browser_build": browser_build,
+                "browser_build_baseline": browser_baseline,
             },
             "browser": {
                 "launch_options": self.launch_options_record,
@@ -1217,6 +1340,10 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
                 "response_samples_per_endpoint": 2,
                 "request_samples_per_endpoint": 2,
                 "listeners_attached_at": "browser_context",
+                "openapi_credential_values_removed": self.openapi_credentials_removed,
+                "out_of_scope_frame_scans": self._out_of_scope_frame_scans,
+                "out_of_scope_frame_hosts": dict(
+                    sorted(self._out_of_scope_frame_hosts.items())),
             },
             "forensic": (
                 self.forensic_config.to_manifest() if self.forensic_config is not None
@@ -1418,6 +1545,11 @@ async def attach_engine_to_page(page, engine):
     # Legacy named-function hooks. Their parse-time blind spot is documented in
     # the session manifest and is deliberately NOT solved here; source rewriting
     # is a later, gated capability.
+    #
+    # They hook globals the APPLICATION defines, and buffer into page globals,
+    # so like the probe's patched half they only work in the page's own JS
+    # world. Installed via `main_world_eval` below; the init script remains as
+    # the fallback for a browser that does not isolate worlds.
     await page.add_init_script(HOOK_AND_OBSERVER_JS)
 
     # Network capture stays on the engine: it also feeds the exporters that
@@ -1441,6 +1573,25 @@ async def attach_engine_to_page(page, engine):
 
         # A page opened later needs its own WebSocket listener.
         context.on("page", engine.websocket_sensor.attach_page)
+
+        # The probe's patched half cannot ride an init script: those run in the
+        # isolated world, where replacing `fetch` changes a global the
+        # application never calls. It goes in through a main-world evaluate
+        # instead, which is only possible AFTER a navigation commits -- so it
+        # is re-installed on every one, for every in-scope frame.
+        async def install_main_world(frame) -> None:
+            if not engine.scope.contains(getattr(frame, "url", "") or ""):
+                return
+            await engine.runtime_sensor.install_main_world(frame)
+            # The legacy hooks need the same world for the same reason.
+            with contextlib.suppress(Exception):
+                await frame.evaluate("mw:" + HOOK_AND_OBSERVER_JS)
+
+        def on_navigated(frame) -> None:
+            asyncio.get_running_loop().create_task(install_main_world(frame))
+
+        page.on("framenavigated", on_navigated)
+        context.on("page", lambda p: p.on("framenavigated", on_navigated))
     else:
         # Without the package the engine still works, but observes far less.
         page.on("framenavigated", engine.handle_frame_navigated)
@@ -1500,6 +1651,40 @@ def _configure_stdout():
             reconfigure(encoding="utf-8", errors="replace")
 
 
+def announce_browser_baseline(engine) -> dict:
+    """Say, before the session starts, whether this browser is the tested one.
+
+    The browser is fetched outside uv.lock, so it can change under a working
+    install. When it did, JS world isolation came back and the runtime probe's
+    patched instruments went silent for a whole capture -- with nothing in the
+    console, the manifest or the health report saying so. This is the warning
+    that was missing.
+    """
+    try:
+        from scriptscrap.baseline import compare_browser_build
+    except ImportError:
+        return {"status": "unknown"}
+
+    comparison = compare_browser_build()
+    if comparison["status"] == "match":
+        print(f"    [browser] {comparison['found']} — matches the verified baseline.")
+        return comparison
+
+    print("\n" + "!" * 72)
+    print(f"!! BROWSER BUILD IS NOT THE BASELINE: {comparison['found']} "
+          f"(baseline {comparison['baseline']})")
+    print(f"!! {comparison['note']}")
+    print("!! Run: uv run diagnostics/probes/js_world_probe.py")
+    print("!" * 72 + "\n")
+    engine.emit_capture_gap(
+        "browser_build_not_baseline",
+        found=comparison["found"],
+        baseline=comparison["baseline"],
+        note=comparison["note"],
+    )
+    return comparison
+
+
 async def main():
     _configure_stdout()
 
@@ -1512,6 +1697,10 @@ async def main():
 
     # exclude_addons is load-bearing: Camoufox installs uBlock Origin as a
     # default addon, which silently filters requests out of the capture.
+    #
+    # main_world_eval is equally load-bearing: without it the runtime probe's
+    # patched instruments land in the isolated world and observe nothing, which
+    # is exactly how a whole capture came back with zero fetch/XHR evidence.
     launch_options = {
         "headless": False,
         "humanize": True,
@@ -1519,11 +1708,13 @@ async def main():
         "geoip": False,
         "enable_cache": True,
         "exclude_addons": [DefaultAddons.UBO],
+        "main_world_eval": True,
     }
     engine.record_launch_options(launch_options)
 
     print("\n🦊 [CAMOUFOX] Booting active introspection engine...")
     print("    [addons] uBlock Origin EXCLUDED — capturing the app's real requests.")
+    announce_browser_baseline(engine)
     try:
         async with AsyncCamoufox(**launch_options) as browser:
             page = await browser.new_page(locale="fr-FR", timezone_id="Europe/Paris")

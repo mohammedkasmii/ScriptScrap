@@ -36,9 +36,20 @@ def record(status: str, name: str, detail: str) -> None:
     results.append((status, name, detail))
 
 
+def _baseline():
+    """The pinned baseline, if the scriptscrap package is importable."""
+    try:
+        from scriptscrap import baseline
+    except ImportError:
+        return None
+    return baseline
+
+
 def check_versions() -> None:
     record(PASS, "python", sys.version.split()[0])
-    for pkg, expected in (("camoufox", "0.5.5"), ("playwright", "1.60.0")):
+    base = _baseline()
+    pins = base.PACKAGE_PINS if base else {"camoufox": "0.5.5", "playwright": "1.60.0"}
+    for pkg, expected in pins.items():
         try:
             found = importlib.metadata.version(pkg)
         except importlib.metadata.PackageNotFoundError:
@@ -55,13 +66,34 @@ def check_versions() -> None:
 
 
 def check_browser() -> None:
-    try:
-        from camoufox.pkgman import installed_verstr
+    """The browser build is NOT pinned by uv.lock, so it is checked here.
 
-        record(PASS, "camoufox browser build", installed_verstr())
-    except Exception as exc:
-        record(FAIL, "camoufox browser build", f"not fetched or unreadable ({exc}). "
-                                               "Run: python -m camoufox fetch")
+    Printing the build was not enough: a drift from beta.28 to beta.29
+    re-enabled JS world isolation and disabled every monkey-patched instrument
+    in the runtime probe, and nothing in this doctor noticed. Compare it.
+    """
+    base = _baseline()
+    if base is None:
+        try:
+            from camoufox.pkgman import installed_verstr
+            record(WARN, "camoufox browser build",
+                   f"{installed_verstr()} (scriptscrap not importable; "
+                   f"cannot compare to the recorded baseline)")
+        except Exception as exc:
+            record(FAIL, "camoufox browser build",
+                   f"not fetched or unreadable ({exc}). Run: python -m camoufox fetch")
+        return
+
+    comparison = base.compare_browser_build()
+    if comparison["status"] == "match":
+        record(PASS, "camoufox browser build", f"{comparison['found']} (baseline)")
+    elif comparison["status"] == "unknown":
+        record(FAIL, "camoufox browser build",
+               "not fetched or unreadable. Run: python -m camoufox fetch")
+    else:
+        record(FAIL, "camoufox browser build",
+               f"{comparison['found']}, baseline is {comparison['baseline']}. "
+               f"{comparison['note']}")
 
 
 def check_default_addons() -> None:

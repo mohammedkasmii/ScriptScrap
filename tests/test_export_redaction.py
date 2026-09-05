@@ -149,3 +149,25 @@ def test_export_reports_what_it_did(tmp_path):
     stats = exporter.redactor.stats()
     assert set(stats) == {"credentials_removed", "values_pseudonymised",
                           "distinct_pseudonyms"}
+
+# --- real-world capture regression --------------------------------------
+
+def test_bare_csrf_field_name_is_a_credential():
+    """A live login form named its token field `_csrf`.
+
+    The name list spelled out `x-csrf-token` and `csrf-token` but not the bare
+    stem, so the field sailed through into a generated OpenAPI example.
+    """
+    from scriptscrap.export.redact import is_credential_name
+
+    for name in ("_csrf", "csrf", "csrfToken", "_xsrf", "XSRF-TOKEN"):
+        assert is_credential_name(name), name
+
+
+def test_ordinary_field_names_are_not_credentials():
+    """The stem must not start swallowing vocabulary."""
+    from scriptscrap.export.redact import is_credential_name
+
+    for name in ("id", "name", "status", "same_source_seq", "response_to_request",
+                 "url", "method", "count"):
+        assert not is_credential_name(name), name

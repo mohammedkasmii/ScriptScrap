@@ -32,6 +32,29 @@ property visible rather than letting it be discovered later on a real portal.
 fails if either file is ever regenerated against a non-loopback host, so a live
 session cannot be committed by accident.
 
+## The browser build is part of this baseline
+
+`camoufox_browser_build` is normalised to `<PINNED>` in the snapshot, so the
+committed file does not say which browser produced it. It matters, because the
+browser is fetched outside `uv.lock` and its behaviour is not stable:
+
+| Re-blessed on | Notable behavioural difference |
+|---|---|
+| `152.0.4-beta.28` | original baseline |
+| `152.0.4-beta.29` | JS worlds isolated; `user_click` 20 → 22 for the same script |
+
+The `user_click` change is the browser's, not the tool's — the same count comes
+out of the pre-fix code on the same build. The runtime-probe counts
+(`runtime_fetch` 14, `runtime_history` 3) are unchanged across both builds
+*because* the probe now installs its patched half in the page's own world;
+before that fix, beta.29 produced zero of them.
+
+`scriptscrap.baseline.BROWSER_BUILD` remains `152.0.4-beta.28`: that is the
+build the *empirical assumptions* in `diagnostics/probes/` were verified on, and
+`hook_timing_probe.py` still fails on beta.29. The doctor reports the mismatch
+deliberately. Do not bump it to silence the warning — bump it only after every
+probe passes.
+
 ## Reviewing a failure
 
 A golden-master failure is a **decision point**, not automatically a bug.

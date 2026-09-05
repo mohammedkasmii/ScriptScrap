@@ -24,6 +24,14 @@ non-destructiveness) was verified against camoufox 0.5.5 / playwright 1.60.0 /
 browser 152.0.4-beta.28. Do not bump them without re-running the diagnostics and
 re-reviewing the golden master.
 
+**`uv.lock` does not pin the browser.** `python -m camoufox fetch` replaces the
+Firefox build independently, and a drift from `152.0.4-beta.28` to `beta.29`
+re-enabled JS world isolation — which disabled every monkey-patched instrument
+in the runtime probe for an entire real capture while capture health still
+reported the probe healthy. The baseline is therefore an assertion, not a
+comment: it lives in `src/scriptscrap/baseline.py`, `check_environment.py`
+**fails** on a mismatch, and every session manifest records the comparison.
+
 ## Verification
 
 ```bash
@@ -51,6 +59,15 @@ uv run python camoufox/camoufox_investigator.py
 
 It asks for a target URL and the engagement scope, opens a browser, and records
 what you do until you press ENTER. Output goes to `v13_investigation_output/`.
+
+The probe runs in **two JavaScript worlds**, because Firefox isolates injected
+scripts from the page. Listeners (clicks, input, DOM mutations) go in the
+isolated world with the reporting channel; the monkey-patched instruments
+(`fetch`, XHR, `sendBeacon`, form submit, `pushState`) must replace the globals
+the *application* calls, so they are installed into the page's own world with
+`main_world_eval` and hand records back over a DOM CustomEvent. The launch
+option is load-bearing: without it the patches observe nothing, and the sensor
+says so rather than reporting a quiet session.
 
 **That directory is an unredacted capture of an authenticated session.** It is
 gitignored by pattern and carries its own `SECURITY.md`. Read
@@ -110,9 +127,10 @@ analysable, and no raw bodies, screenshots or HTML.
 ```
 camoufox/camoufox_investigator.py   the investigator (behavioural authority)
 src/scriptscrap/
+  baseline.py  the pinned browser build, asserted by the doctor and the manifest
   events/      append-only event spine + offline reader
   sensors/     observation sensors (lifecycle, runtime, websocket, storage)
-  probe/       the injected in-page observer
+  probe/       the injected in-page observer, in two JS-world roles
   analysis/    OFFLINE inference: endpoints, schemas, correlation, selectors,
                states, technology, reconciliation, capture health.
                Imports no browser -- enforced by test.

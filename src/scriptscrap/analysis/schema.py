@@ -72,11 +72,21 @@ def _detect_format(values: list[str]) -> str | None:
 
 
 class _FieldAccumulator:
-    __slots__ = ("types", "present", "nulls", "values", "examples")
+    """Two counters, because a field inside an array has two denominators.
+
+    `occurrences` counts every value seen; `bodies` counts the bodies the path
+    appeared in at all. For `$.items[].name` in one response holding six items
+    those are 6 and 1, and only the second can be compared to the sample count.
+    Reporting the first as presence produced `present 6/1`, which reads as a
+    corrupt record rather than as an array.
+    """
+
+    __slots__ = ("types", "occurrences", "bodies", "nulls", "values", "examples")
 
     def __init__(self) -> None:
         self.types: dict[str, int] = defaultdict(int)
-        self.present = 0
+        self.occurrences = 0
+        self.bodies = 0
         self.nulls = 0
         self.values: list[Any] = []
         self.examples: list[Any] = []
@@ -84,7 +94,7 @@ class _FieldAccumulator:
     def observe(self, value: Any) -> None:
         kind = json_type(value)
         self.types[kind] += 1
-        self.present += 1
+        self.occurrences += 1
         if value is None:
             self.nulls += 1
             return
@@ -103,13 +113,18 @@ class SchemaInferrer:
         self._root_types: dict[str, int] = defaultdict(int)
         self._samples = 0
         self._evidence = Evidence()
+        self._seen_in_body: set[str] = set()
 
     def observe(self, body: Any, event_id: str | None = None) -> None:
         self._samples += 1
         self._root_types[json_type(body)] += 1
         if event_id:
             self._evidence.cite(event_id)
+        self._seen_in_body = set()
         self._walk(body, "$")
+        # Presence is per BODY, however many times the path occurred inside it.
+        for path in self._seen_in_body:
+            self._fields[path].bodies += 1
 
     def _walk(self, value: Any, path: str) -> None:
         if len(self._fields) >= MAX_FIELDS:
@@ -118,6 +133,7 @@ class SchemaInferrer:
             for key, child in value.items():
                 child_path = f"{path}.{key}"
                 self._fields[child_path].observe(child)
+                self._seen_in_body.add(child_path)
                 self._walk(child, child_path)
         elif isinstance(value, list):
             # One merged description of the element shape, not one per index:
@@ -125,6 +141,7 @@ class SchemaInferrer:
             item_path = f"{path}[]"
             for item in value[:MAX_ARRAY_ITEMS]:
                 self._fields[item_path].observe(item)
+                self._seen_in_body.add(item_path)
                 self._walk(item, item_path)
 
     def build(self, endpoint_key: str, direction: str, status: str | None = None) -> Schema:
@@ -134,12 +151,16 @@ class SchemaInferrer:
             enum_candidate = None
             distinct = sorted({str(v) for v in acc.values})
             # Small closed-looking set, seen often enough to be worth flagging.
-            if acc.present >= 3 and 1 < len(distinct) <= 6 and len(distinct) * 2 <= acc.present:
+            # The denominator here is occurrences, not bodies: what makes a set
+            # look closed is how many VALUES agreed, wherever they came from.
+            if (acc.occurrences >= 3 and 1 < len(distinct) <= 6
+                    and len(distinct) * 2 <= acc.occurrences):
                 enum_candidate = distinct
             fields.append(SchemaField(
                 path=path,
                 types=dict(sorted(acc.types.items(), key=lambda kv: (-kv[1], kv[0]))),
-                present_count=acc.present,
+                present_count=acc.bodies,
+                occurrence_count=acc.occurrences,
                 sample_count=self._samples,
                 null_count=acc.nulls,
                 enum_candidate=enum_candidate,

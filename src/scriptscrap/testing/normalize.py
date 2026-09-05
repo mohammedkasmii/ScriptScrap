@@ -47,7 +47,11 @@ PLACEHOLDER_MONO = "<MONO>"
 # pyproject.toml and asserted by a dedicated test, so an upgrade produces one
 # clear failure instead of a diff smeared across every golden file.
 PINNED_ENV_KEYS = frozenset(
-    {"python", "platform", "camoufox_lib", "playwright", "camoufox_browser_build"}
+    {"python", "platform", "camoufox_lib", "playwright", "camoufox_browser_build",
+     # The baseline COMPARISON is environment too: it says match or mismatch
+     # depending on which browser this machine fetched, which is exactly the
+     # environment fact its dedicated test asserts.
+     "browser_build_baseline"}
 )
 
 # Keys carrying a monotonic clock reading. Ordering is asserted separately.
