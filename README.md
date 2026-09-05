@@ -21,16 +21,20 @@ Dependencies are pinned and locked (`uv.lock`). **The pinned versions are part o
 the behavioural baseline** — every empirical finding the design rests on (JS world
 semantics, runtime hook timing, uBlock default-addon filtering, snapshot
 non-destructiveness) was verified against camoufox 0.5.5 / playwright 1.60.0 /
-browser 152.0.4-beta.28. Do not bump them without re-running the diagnostics and
+browser 152.0.4-beta.29. Do not bump them without re-running the diagnostics and
 re-reviewing the golden master.
 
 **`uv.lock` does not pin the browser.** `python -m camoufox fetch` replaces the
-Firefox build independently, and a drift from `152.0.4-beta.28` to `beta.29`
-re-enabled JS world isolation — which disabled every monkey-patched instrument
-in the runtime probe for an entire real capture while capture health still
-reported the probe healthy. The baseline is therefore an assertion, not a
-comment: it lives in `src/scriptscrap/baseline.py`, `check_environment.py`
-**fails** on a mismatch, and every session manifest records the comparison.
+Firefox build independently, and that is not cosmetic: the drift from
+`152.0.4-beta.28` to `beta.29` isolated the JS worlds, which disabled every
+monkey-patched instrument in the runtime probe for an entire real capture while
+capture health still reported the probe healthy. The baseline is therefore an
+assertion, not a comment: it lives in `src/scriptscrap/baseline.py`,
+`check_environment.py` **fails** on a mismatch, and every session manifest
+records the comparison.
+
+Bumping the baseline means *all four probes were run on that build and passed* —
+never that a warning was inconvenient.
 
 ## Verification
 

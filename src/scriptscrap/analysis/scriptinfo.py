@@ -110,7 +110,16 @@ def find_parse_time_calls(source: str, names: list[str]) -> list[str]:
         # A call to it at brace depth zero, i.e. in the file's top-level body,
         # which runs during the same parse that defines it. Position matters,
         # not line layout: `window.x = theFunction()` is still a top-level call.
-        for call in re.finditer(rf"(?<![.\w${{]){re.escape(name)}\s*\(", source):
+        #
+        # An explicit global receiver counts as a call to the same function:
+        # `window.doThing()` IS `doThing()`. Only that receiver is admitted --
+        # a bare `.` lookbehind would also match `someObject.doThing()`, which
+        # is a different function that happens to share a name. Leaving the
+        # `window.` form out meant the commonest way legacy code invokes its
+        # own globals was read as "not called at parse time".
+        pattern = (rf"(?<![.\w${{])(?:(?:window|globalThis|self)\s*\.\s*)?"
+                   rf"{re.escape(name)}\s*\(")
+        for call in re.finditer(pattern, source):
             if call.start() <= declared.end():
                 continue          # the declaration itself
             if depths[call.start()] == 0:

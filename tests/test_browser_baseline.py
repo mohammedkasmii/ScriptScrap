@@ -1,10 +1,13 @@
 """The browser build is not pinned by uv.lock, so it is asserted here.
 
 Every empirical finding this design rests on was verified against ONE Firefox
-build. A drift from 152.0.4-beta.28 to beta.29 re-enabled JS world isolation
-and silently disabled every monkey-patched instrument in the runtime probe for
-an entire real capture, while the environment doctor printed the new build
-without comment because it had nothing to compare it against.
+build. A drift from 152.0.4-beta.28 to beta.29 isolated the JS worlds and
+silently disabled every monkey-patched instrument in the runtime probe for an
+entire real capture, while the environment doctor printed the new build without
+comment because it had nothing to compare it against.
+
+Nothing here hardcodes a build number except through `baseline` itself, so
+these tests keep their meaning across a legitimate bump.
 """
 
 from __future__ import annotations
@@ -25,10 +28,14 @@ def test_matching_build_is_reported_as_a_match():
 
 
 def test_a_drifted_build_is_a_mismatch_with_an_actionable_note():
-    result = baseline.compare_browser_build("152.0.4-beta.29")
+    # Derived from the baseline rather than hardcoded: the previous version of
+    # this test named beta.29 as "the drifted build", which stopped being true
+    # the moment the probes passed on it and it became the baseline.
+    drifted = baseline.BROWSER_BUILD + "-not-this-one"
+    result = baseline.compare_browser_build(drifted)
     assert result["status"] == "mismatch"
     assert result["baseline"] == baseline.BROWSER_BUILD
-    assert result["found"] == "152.0.4-beta.29"
+    assert result["found"] == drifted
     assert "diagnostics/probes" in result["note"]
 
 

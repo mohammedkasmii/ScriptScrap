@@ -49,11 +49,15 @@ out of the pre-fix code on the same build. The runtime-probe counts
 *because* the probe now installs its patched half in the page's own world;
 before that fix, beta.29 produced zero of them.
 
-`scriptscrap.baseline.BROWSER_BUILD` remains `152.0.4-beta.28`: that is the
-build the *empirical assumptions* in `diagnostics/probes/` were verified on, and
-`hook_timing_probe.py` still fails on beta.29. The doctor reports the mismatch
-deliberately. Do not bump it to silence the warning — bump it only after every
-probe passes.
+`scriptscrap.baseline.BROWSER_BUILD` is now `152.0.4-beta.29`. It was held at
+beta.28 until the compatibility probes were migrated to test the split-world
+architecture that de07d1b introduced — the old probes asserted that injected
+scripts shared the page's window, which stopped being true and is no longer
+what the tool relies on. With all four probes passing on beta.29, the baseline
+follows the evidence.
+
+Do not bump it to silence a warning. Bump it only after every probe passes on
+the new build.
 
 ## Reviewing a failure
 

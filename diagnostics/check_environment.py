@@ -205,14 +205,61 @@ def check_scope_policy() -> None:
 
 
 def check_known_blind_spots() -> None:
-    """Not failures -- limitations that must stay visible until later milestones."""
+    """Not failures -- limitations that must stay visible until later milestones.
+
+    Kept honest in both directions. Two entries here described the tool as it
+    was before M2, and a stale warning is its own kind of lie: it trains a
+    reader to skim the list, which is where the real blind spots are.
+    """
     for note in (
+        # Still true: Firefox does not expose service-worker traffic to
+        # Playwright at all, so nothing in the capture can see it.
         "service-worker traffic is invisible to Playwright on Firefox",
-        "WebSocket frames are available on Firefox but not subscribed to",
-        "in-page hook buffers are wiped by every full page navigation",
-        "JS hooks miss calls made during initial page parse",
+
+        # Narrowed. The runtime probe flushes on pagehide, beforeunload and
+        # visibilitychange, and its page-world half dispatches synchronously
+        # rather than buffering, so probe evidence survives navigation. What
+        # is still read once at exit are the LEGACY page-side catalogs.
+        "legacy exit-read catalogs (window.functionHookLogs, window.domMutations, "
+        "the jQuery event map and dropdown catalogs) are read once at session end, "
+        "so they describe only the final document; runtime probe events are "
+        "flushed before each navigation and are NOT affected",
+
+        # Still true, and now measured from two directions by
+        # diagnostics/probes/hook_timing_probe.py.
+        "a function declared AND called during its own initial parse cannot be "
+        "wrapped by the runtime probe; forensic source reading identifies it but "
+        "does not hook it",
+
+        # The part of WebSocket observation that is genuinely still missing.
+        # Frames themselves ARE captured -- see check_websocket_subscription.
+        "WebSocket handshake headers are not exposed by Playwright, so the "
+        "authentication used to open a socket is not recoverable",
     ):
         record(WARN, "known blind spot", note)
+
+
+def check_websocket_subscription() -> None:
+    """Prove the frame subscription exists instead of describing it.
+
+    This was a standing WARN saying frames were "available on Firefox but not
+    subscribed to" long after M2 subscribed to them -- a real capture recorded
+    29 sockets, 72 frames sent and 134 received while the doctor still called
+    it a blind spot. Checking the source keeps the claim true by construction.
+    """
+    sensor = REPO / "src" / "scriptscrap" / "sensors" / "websocket.py"
+    if not sensor.exists():
+        record(WARN, "websocket frames", "sensor module not found")
+        return
+    source = sensor.read_text(encoding="utf-8")
+    subscribed = [name for name in ("framesent", "framereceived")
+                  if f'"{name}"' in source]
+    if len(subscribed) == 2:
+        record(PASS, "websocket frames", "sent and received frames are subscribed")
+    else:
+        record(WARN, "websocket frames",
+               f"only {subscribed or 'no'} frame event(s) subscribed; "
+               f"payloads will be missing from the capture")
 
 
 def main() -> int:
@@ -223,6 +270,7 @@ def main() -> int:
     check_gitignore()
     check_generated_client_policy()
     check_scope_policy()
+    check_websocket_subscription()
     check_known_blind_spots()
 
     width = max(len(name) for _, name, _ in results)
@@ -244,8 +292,11 @@ def main() -> int:
         print("\nDo not trust investigation output until these are resolved.")
     else:
         print("\nNo blocking problems. Browser-level assumptions are verified separately:")
-        print("  uv run diagnostics/probes/hook_timing_probe.py")
+        # All four. These are the evidence behind the browser baseline above,
+        # so the list must not be a subset of them.
         print("  uv run diagnostics/probes/js_world_probe.py")
+        print("  uv run diagnostics/probes/hook_timing_probe.py")
+        print("  uv run diagnostics/probes/snapshot_integrity_probe.py")
         print("  uv run diagnostics/probes/addon_filter_probe.py   (needs network)")
     print("=" * 78)
     return 1 if failures else 0

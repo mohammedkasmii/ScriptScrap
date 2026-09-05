@@ -2,29 +2,51 @@
 <!--
   Fixture page for js_world_probe.py.
 
-  Its inline script runs in the page's REAL main world and reports what it can
-  see, by writing into document.title. Because the title is DOM state rather
-  than a JS global, the probe can read it back regardless of which JS world
-  page.evaluate happens to run in -- which is exactly the thing under test.
+  This file plays the APPLICATION. Everything in it runs in the page's real
+  main world, and it reports what it can see through the DOM rather than
+  through a JS global -- the DOM is the one thing both JS worlds share, so a
+  DOM report is readable no matter which world the driver's evaluate lands in.
+  That is the property under test, so the report must not depend on it.
 -->
 <html><head><title>pending</title></head>
 <body>
 <div id="out">pending</div>
+<div id="app-observation">pending</div>
 <script>
 window.__pageWorld = "PAGE_MARKER";
-window.pageFn = function (a, b) { return a + b; };
 
+/* What the page can see of the driver's isolated world. Both of these are
+   expected to be ABSENT/NATIVE on a browser that isolates worlds, and the
+   probe asserts exactly that rather than treating it as a failure. */
 var seen = {
   initMarkerVisibleToPage: (typeof window.__initWorld !== "undefined")
       ? window.__initWorld : "ABSENT",
   fetchIsPatchedFromPageView: (window.fetch && window.fetch.__patchedByInit === true)
-      ? "PATCHED" : "NATIVE",
-  fetchToString: String(window.fetch).slice(0, 60)
+      ? "PATCHED" : "NATIVE"
 };
 document.getElementById("out").textContent = JSON.stringify(seen);
 document.title = JSON.stringify(seen);
 
-// Call pageFn immediately so a hook that landed late records nothing.
-window.__pageFnResult = window.pageFn(2, 3);
+/*
+  The application's own network call. It is deliberately NOT made during
+  initial parse: the page-world patch is installed after a navigation commits,
+  so a parse-time call is a known blind spot (hook_timing_probe.py measures
+  that separately). This is the ordinary case -- application code running
+  after load -- which the runtime probe must observe.
+
+  callApplicationFetch() is invoked by the driver, from the page world, so the
+  call site is genuinely application code and not the driver's own frame.
+*/
+window.callApplicationFetch = function () {
+  var report = {
+    applicationSeesPatchedFetch:
+        (window.fetch && window.fetch.__probePatched === true) ? "PATCHED" : "NATIVE"
+  };
+  document.getElementById("app-observation").textContent = JSON.stringify(report);
+  try {
+    window.fetch("data:text/plain,application-call").catch(function () {});
+  } catch (e) { /* the call being OBSERVED is the point, not it succeeding */ }
+  return report.applicationSeesPatchedFetch;
+};
 </script>
 </body></html>

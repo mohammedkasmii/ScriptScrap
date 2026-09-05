@@ -224,3 +224,37 @@ def test_parse_time_calls_are_detectable_in_source():
     )
     found = find_parse_time_calls(source, ["fixtureEarlyFunction", "fixtureLateFunction"])
     assert found == ["fixtureEarlyFunction"]
+
+
+def test_a_call_through_window_is_the_same_call():
+    """`window.doThing()` IS `doThing()`, and legacy code writes it that way.
+
+    Excluding any dotted form missed the commonest way a script invokes its own
+    global, so a real parse-time call read as "not called at parse time".
+    Found by hook_timing_probe.py, whose fixture uses the realistic form.
+    """
+    source = (
+        "function fixtureEarlyFunction(a, b) { return a * b; }\n"
+        "window.fixtureEarlyFunction = fixtureEarlyFunction;\n"
+        "window.__earlyCallResult = window.fixtureEarlyFunction(6, 7);\n"
+    )
+    assert find_parse_time_calls(source, ["fixtureEarlyFunction"]) \
+        == ["fixtureEarlyFunction"]
+
+
+def test_a_call_on_another_object_is_a_different_function():
+    """The reason the dotted form was excluded in the first place. Still true."""
+    source = (
+        "function doThing(a) { return a; }\n"
+        "var helper = { doThing: function () { return 0; } };\n"
+        "helper.doThing(1);\n"
+    )
+    assert find_parse_time_calls(source, ["doThing"]) == []
+
+
+def test_a_call_inside_a_function_body_is_not_parse_time():
+    source = (
+        "function doThing(a) { return a; }\n"
+        "function later() { return window.doThing(1); }\n"
+    )
+    assert find_parse_time_calls(source, ["doThing"]) == []

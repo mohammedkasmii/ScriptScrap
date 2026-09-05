@@ -12,6 +12,11 @@ instrument in the runtime probe while leaving the listener-based ones working.
 The capture looked fine. The doctor printed the new build without comment,
 because it had nothing to compare it to.
 
+Bumping this value is therefore a claim, not a formality: it asserts that every
+probe in `diagnostics/probes/` has been run on the named build and passed. A
+bump made to silence a warning would remove the only signal that says the
+evidence underneath a capture is untested.
+
 So the baseline lives here, in one place, machine-readable, imported by both
 the environment doctor and the investigator. A mismatch is not fatal -- the
 tool still runs -- but it is stated loudly at launch and written into the
@@ -26,7 +31,17 @@ from typing import Any
 # The build every diagnostics/probes/ result in this repo was verified against.
 # Bump this ONLY after re-running those probes and re-reviewing the golden
 # master; the version string alone is worth nothing without that.
-BROWSER_BUILD = "152.0.4-beta.28"
+#
+# 152.0.4-beta.29, verified by all four probes passing on it:
+#   js_world_probe            split-world runtime architecture (5 contracts)
+#   hook_timing_probe         late-call observation + the parse-time limitation
+#   snapshot_integrity_probe  capture does not modify the live page
+#   addon_filter_probe        uBlock default-addon filtering
+# The previous baseline, 152.0.4-beta.28, shared a JS world between injected
+# scripts and the page. beta.29 isolates them. The runtime probe was migrated
+# to a split-world design in de07d1b, and the probes above now assert THAT
+# architecture rather than the shared-world assumption it replaced.
+BROWSER_BUILD = "152.0.4-beta.29"
 
 # Python packages, mirrored from uv.lock so the doctor has one source.
 PACKAGE_PINS = {

@@ -25,9 +25,13 @@ blocking problem.
 | Probe | Verifies | Needs network |
 |---|---|---|
 | `probes/snapshot_integrity_probe.py` | Visual capture does not modify the live page (F-03) | no |
-| `probes/hook_timing_probe.py` | JS world semantics over `http://`; runtime hook timing | no |
-| `probes/js_world_probe.py` | JS world semantics over `file://` | no |
+| `probes/js_world_probe.py` | The split-world runtime architecture, over `file://` | no |
+| `probes/hook_timing_probe.py` | Runtime hook timing over `http://`; the parse-time limitation | no |
 | `probes/addon_filter_probe.py` | uBlock Origin default-addon filtering | **yes** |
+
+All four are the evidence behind `scriptscrap.baseline.BROWSER_BUILD`. Run them
+on a new browser build before bumping it; `check_environment.py` fails until
+they agree.
 
 ```bash
 uv run diagnostics/probes/snapshot_integrity_probe.py
@@ -71,7 +75,7 @@ Camoufox adds uBlock Origin to `addons` **unconditionally** unless
 investigator running with defaults captures an ad-blocked view of the target and
 has no way to know it.
 
-Measured on camoufox 0.5.5 / browser `152.0.4-beta.28`: with defaults, a request
+Measured on camoufox 0.5.5 / browser `152.0.4-beta.29`: with defaults, a request
 to `googletagmanager.com/gtm.js` raised `NetworkError` and fired `requestfailed`;
 with `exclude_addons=[DefaultAddons.UBO]` the same request completed.
 
@@ -79,35 +83,68 @@ The **binding assertion** is the static one: `camoufox_investigator.py` must pas
 `exclude_addons=[DefaultAddons.UBO]`. The live comparison is supporting evidence
 and can legitimately vary as filter lists change.
 
-### `hook_timing_probe.py` — instrumentation reachability
+### `js_world_probe.py` — the split-world runtime architecture
 
-Three assumptions:
+**Superseded assumption.** Until `de07d1b` these probes asserted that
+`add_init_script` and `page.evaluate` reached the page's real `window`. On
+browser `152.0.4-beta.28` that was measurably true and contradicted Camoufox's
+own documentation. On `beta.29` it stopped being true, every monkey-patched
+instrument in the runtime probe went silent, and a whole real capture came back
+with no fetch, XHR, beacon or `pushState` evidence in it.
 
-1. **`add_init_script` reaches the page's real `window`.** Camoufox's
-   documentation states that all Playwright JS is isolated from the page, which
-   would mean monkey-patches never take effect. On the pinned stack the measured
-   behaviour **contradicts the documentation** — patches do reach the page. This
-   must therefore be *measured*, never read off the docs. If it ever fails, every
-   in-page hook silently stops working and `js_hooks_and_mutations.json` becomes
-   a permanently empty file that looks like a finding.
-2. **`page.evaluate` reads the page's real `window`.** If not, reading back
-   `window.functionHookLogs` returns an isolated-world copy and always looks
-   empty.
-3. **The `setInterval` hook pattern misses parse-time calls.** Known answer:
-   it does. The probe records this so the limitation stays visible, and so a
-   stack change that fixes it gets noticed.
+World isolation is therefore **no longer treated as a failure**. It is the
+premise. The runtime probe splits by what each technique needs, and this probe
+verifies the five contracts that split depends on:
 
-Assumption 3 also demonstrates that an `Object.defineProperty` accessor trap
-does **not** fix it: a classic-script `function` declaration binds via
-`[[DefineOwnProperty]]`, which *replaces* the accessor rather than invoking its
-setter. There is currently no injected-JS technique that reliably hooks a named
-global function called during initial page parse.
+| | Contract |
+|---|---|
+| A | Worlds are isolated — driver globals invisible to the page, and vice versa |
+| B | `evaluate("mw:" + script)` reaches the page's own world, idempotently |
+| C | A patch installed that way is what page-authored code actually calls |
+| D | A record dispatched over the DOM `CustomEvent` bridge reaches the isolated world **and** Python through the exposed binding |
+| E | One application call yields exactly one observation — the roles install disjoint instruments |
 
-### `js_world_probe.py` — same assumptions, different origin
+It mirrors the mechanism rather than importing it, so it measures the
+*browser* and still runs in a bare venv. `tests/test_diagnostics.py` asserts the
+bridge event name matches `src/scriptscrap/probe/probe.js`, so the mirror
+cannot drift.
 
-Isolated-world behaviour can in principle differ between `file://` and `http://`
-origins. Both are kept: if the two probes ever disagree, that disagreement is
-itself the finding.
+### `hook_timing_probe.py` — when instrumentation can be installed
+
+`js_world_probe.py` establishes that the page's globals *can* be patched. This
+one measures **when**, and therefore what is observable:
+
+1. **Late calls are observed.** A function called after load is wrapped and
+   recorded. The ordinary case, and it must work.
+2. **Parse-time calls are not.** A function declared and called during its own
+   initial parse has already run before a page-world patch can be installed —
+   page-world execution is only available once a navigation has committed. Two
+   independent techniques are measured so the finding is about *timing*, not
+   about one implementation:
+   * interval polling installs its wrapper too late;
+   * an `Object.defineProperty` accessor trap fails twice over. In the isolated
+     world it installs and never fires, because the page's declaration writes to
+     a different `window`. In the page world it cannot be installed **at all**
+     after the fact — a top-level `function` declaration creates a
+     *non-configurable* global property, and the browser refuses to redefine it.
+     There is no placement that both reaches the page's window and precedes the
+     declaration.
+3. **Source reading identifies what runtime hooking cannot.** The optional M4
+   forensic layer reads a script's source before Firefox parses it, and
+   `find_parse_time_calls` names the early function. That establishes the
+   function exists and is called during its own parse. It does **not** hook the
+   call, and ScriptScrap does not rewrite source to make it hookable — M4
+   deliberately left rewriting unimplemented.
+
+The probe reads every page global through the `mw:` prefix. An earlier version
+called a page function through an ordinary `page.evaluate` and died with a
+`TypeError` that looked like a browser regression and was really the probe
+asking the wrong world. A limitation must be reported as a finding, never as a
+traceback.
+
+Both probes are kept because isolated-world behaviour can in principle differ
+between `file://` (`js_world_probe`) and `http://` (`hook_timing_probe`)
+origins. If they ever disagree, that disagreement is itself the finding.
 
 ## Exit codes
 
