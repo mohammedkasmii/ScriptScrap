@@ -8,6 +8,7 @@ and that its tests need no browser.
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 
@@ -15,7 +16,13 @@ from ..events import Event, EventLogReader, EventType
 from .correlation import CorrelationAnalyzer
 from .endpoints import EndpointAnalyzer, endpoint_key_for_request
 from .health import HealthAnalyzer
-from .models import ANALYSIS_VERSION, AnalysisResult, Evidence, Finding
+from .models import (
+    ANALYSIS_VERSION,
+    AnalysisResult,
+    EventIndexRow,
+    Evidence,
+    Finding,
+)
 from .reconcile import Reconciler
 from .schema import SchemaInferrer
 from .selectors import SelectorAnalyzer
@@ -76,9 +83,53 @@ def _script_inventory(events: list[Event]) -> list[dict]:
 
 
 def analyze_log(path: str | Path) -> AnalysisResult:
-    reader = EventLogReader(path)
+    """Analyse a log on disk, and index where each event's evidence lives.
+
+    `analyze_events` stays offset-free: a caller holding events in memory has
+    no file for an offset to point into, and inventing one would be a lie.
+    Offsets are attached here, where the file is.
+    """
+    reader = EventLogReader(path, with_offsets=True)
     session_id = reader.events[0].session_id if reader.events else "unknown"
-    return analyze_events(list(reader), session_id)
+    result = analyze_events(list(reader), session_id)
+
+    index: list[EventIndexRow] = []
+    for event in reader.events:
+        located = reader.offsets.get(event.event_id)
+        if located is None:
+            continue
+        offset, length = located
+        index.append(EventIndexRow(
+            event_id=event.event_id,
+            seq=event.seq,
+            type=str(event.type),
+            source=str(event.source),
+            t_wall=event.t_wall,
+            t_mono=event.t_mono,
+            page_id=event.page_id,
+            frame_id=event.frame_id,
+            byte_offset=offset,
+            byte_length=length,
+        ))
+    result.event_index = index
+
+    log = Path(path)
+    result.log_size = log.stat().st_size
+    result.log_sha256 = _sha256_of(log)
+    return result
+
+
+def _sha256_of(path: Path) -> str:
+    """Fingerprint the log the offsets were built from.
+
+    Read in chunks: a session log is routinely tens of megabytes and there is
+    no reason to hold one in memory to hash it.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _attribute_events(events: list[Event], endpoints) -> dict[str, str]:

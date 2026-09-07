@@ -20,7 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Bumped when inference logic changes in a way that invalidates stored results.
-ANALYSIS_VERSION = 1
+# 2: the derived store gained an events index (envelope + byte offset) and the
+#    run gained the log fingerprint those offsets are only valid against.
+ANALYSIS_VERSION = 2
 
 
 @dataclass(slots=True)
@@ -237,6 +239,27 @@ class Finding:
     evidence: Evidence = field(default_factory=Evidence)
 
 
+@dataclass(slots=True, frozen=True)
+class EventIndexRow:
+    """One event's envelope, plus where its line lives in the log.
+
+    Deliberately no payload field. This row exists so evidence can be found,
+    not so it can be stored somewhere else -- `events.jsonl` remains the only
+    place an event's content lives.
+    """
+
+    event_id: str
+    seq: int
+    type: str
+    source: str
+    t_wall: str
+    t_mono: float
+    page_id: str | None
+    frame_id: str | None
+    byte_offset: int
+    byte_length: int
+
+
 @dataclass(slots=True)
 class AnalysisResult:
     """Everything one analysis run derived."""
@@ -257,3 +280,12 @@ class AnalysisResult:
     activities: list[Any] = field(default_factory=list)
     health: dict[str, Any] | None = None
     scripts: list[dict[str, Any]] = field(default_factory=list)
+    # The evidence index. One entry per event: the envelope plus where its line
+    # lives in events.jsonl, so a conclusion can be walked back to its raw
+    # evidence with a seek rather than a re-parse of the whole log. Empty when
+    # the result was derived from events already in memory rather than a file.
+    event_index: list[EventIndexRow] = field(default_factory=list)
+    # The log those offsets were built from. An offset means nothing without
+    # them, so they travel together.
+    log_size: int | None = None
+    log_sha256: str | None = None

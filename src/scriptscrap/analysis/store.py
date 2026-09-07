@@ -30,7 +30,31 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     session_id       TEXT    NOT NULL,
     created_at       TEXT    NOT NULL,
     analysis_version INTEGER NOT NULL,
-    event_count      INTEGER NOT NULL
+    event_count      INTEGER NOT NULL,
+    -- The log this run's byte offsets were built from. An offset is only
+    -- valid for the exact bytes it was computed against, so a reader that
+    -- cannot match both of these must refuse to serve evidence rather than
+    -- return whatever now sits at that position.
+    log_size         INTEGER,
+    log_sha256       TEXT
+);
+
+-- The evidence index: one row per event, holding the ENVELOPE and where the
+-- line lives in events.jsonl. The payload is deliberately NOT here. Copying
+-- it would make this file a second source of truth, and the whole store is
+-- built on being derived and deletable.
+CREATE TABLE IF NOT EXISTS events (
+    run_id      INTEGER NOT NULL REFERENCES analysis_runs(id),
+    event_id    TEXT    NOT NULL,
+    seq         INTEGER NOT NULL,
+    type        TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    t_wall      TEXT    NOT NULL,
+    t_mono      REAL    NOT NULL,
+    page_id     TEXT,
+    frame_id    TEXT,
+    byte_offset INTEGER NOT NULL,
+    byte_length INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS endpoints (
@@ -179,6 +203,13 @@ CREATE INDEX IF NOT EXISTS ix_deps_run       ON dependencies(run_id);
 CREATE INDEX IF NOT EXISTS ix_elements_run   ON ui_elements(run_id);
 CREATE INDEX IF NOT EXISTS ix_fields_schema  ON schema_fields(schema_id);
 CREATE INDEX IF NOT EXISTS ix_selectors_elem ON selectors(element_id);
+
+-- Evidence drill-through is a point lookup by event_id; the timeline is a
+-- filtered walk in seq order. Both are the workspace's hot path.
+CREATE INDEX IF NOT EXISTS ix_events_id     ON events(run_id, event_id);
+CREATE INDEX IF NOT EXISTS ix_events_seq    ON events(run_id, seq);
+CREATE INDEX IF NOT EXISTS ix_events_type   ON events(run_id, type, seq);
+CREATE INDEX IF NOT EXISTS ix_events_source ON events(run_id, source, seq);
 """
 
 
@@ -211,12 +242,25 @@ class DerivedStore:
         """Persist one analysis run. Returns its run id."""
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT INTO analysis_runs (session_id, created_at, analysis_version, event_count) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO analysis_runs (session_id, created_at, analysis_version,"
+            " event_count, log_size, log_sha256) VALUES (?, ?, ?, ?, ?, ?)",
             (result.session_id, datetime.now(UTC).isoformat(),
-             result.analysis_version, result.event_count),
+             result.analysis_version, result.event_count,
+             result.log_size, result.log_sha256),
         )
         run_id = int(cur.lastrowid or 0)
+
+        # The evidence index. executemany because this is the one table whose
+        # row count tracks the log rather than the derived knowledge -- tens of
+        # thousands of rows on a long session.
+        cur.executemany(
+            "INSERT INTO events (run_id, event_id, seq, type, source, t_wall, t_mono,"
+            " page_id, frame_id, byte_offset, byte_length)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [(run_id, row.event_id, row.seq, row.type, row.source, row.t_wall,
+              row.t_mono, row.page_id, row.frame_id, row.byte_offset, row.byte_length)
+             for row in result.event_index],
+        )
 
         for endpoint in result.endpoints:
             cur.execute(
