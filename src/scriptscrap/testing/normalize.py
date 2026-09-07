@@ -100,27 +100,3 @@ def normalize(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, list):
         return [normalize(v) for v in value]
     return value
-
-
-def sort_network_log(entries: list[dict]) -> list[dict]:
-    """Order network entries deterministically.
-
-    Response completion order genuinely varies between runs for concurrent
-    requests, so comparing raw arrival order would produce flaky failures that
-    teach developers to re-bless the baseline without reading it. Sorting by
-    (method, url, body) keeps every entry and every field under test while
-    removing only the ordering.
-
-    Ordering is not lost from the system: the event spine's `seq` is the
-    authoritative order and is checked by its own tests.
-    """
-    import json as _json
-
-    return sorted(
-        entries,
-        key=lambda e: (
-            str(e.get("method", "")),
-            str(e.get("url", "")),
-            _json.dumps(e.get("body"), sort_keys=True, default=str),
-        ),
-    )

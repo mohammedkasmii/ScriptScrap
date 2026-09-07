@@ -16,11 +16,16 @@ from camoufox.addons import DefaultAddons
 from camoufox.async_api import AsyncCamoufox
 
 # ---------------------------------------------------------------------------
-# Event spine (dual-write).
+# Event spine.
 #
-# The structures in WebHarvester remain the behavioural authority. Events are
-# emitted ALONGSIDE them so the model can be proven against real sessions before
-# anything depends on it. The import is defensive: this script must keep working
+# events.jsonl is the only record a session produces. It was dual-written
+# alongside nine legacy JSON outputs while the model was proven against real
+# sessions; those were retired once `scriptscrap analyze` derived everything
+# they stated, with the event ids behind each conclusion attached. The
+# structures in WebHarvester are now the investigator's own running tally --
+# they feed the manifest, not a second output contract.
+#
+# The import is defensive: this script must keep working
 # when run directly from a bare venv that has camoufox but not the scriptscrap
 # package installed. The supported path is `uv run`.
 # ---------------------------------------------------------------------------
@@ -61,19 +66,20 @@ It can contain:
 - `Authorization` / `Cookie` / CSRF headers for a live session
 - full request and response bodies, including personal and business data
 - full-page HTML snapshots and screenshots of authenticated pages
-- an auto-generated API client
+- `events.jsonl`, the append-only record of everything above
 
 ## Rules
 
 1. **Do not commit it.** The repository `.gitignore` covers `*_output/` by
    pattern. Verify with `git check-ignore -v <path>` before any commit.
-2. **Do not share it** outside the authorized engagement. A redaction pipeline
-   that produces a shareable dataset is planned but does not exist yet.
-3. `generated_client.py` contains **no** captured credentials. It reads them
-   from `SCRIPTSCRAP_AUTH_HEADERS` / `SCRIPTSCRAP_COOKIE` at runtime.
-4. Read `session_manifest.json` first. It records the browser build, the addon
+2. **Do not share it** outside the authorized engagement. Use
+   `scriptscrap export`, which writes a sanitised dataset to `export/shared/`:
+   credentials removed, identifiers pseudonymised, no bodies or screenshots.
+3. Read `session_manifest.json` first. It records the browser build, the addon
    configuration, the scope policy and the known blind spots that produced this
    evidence.
+4. `scriptscrap workspace` serves this directory over loopback only, and says
+   UNREDACTED in its header. Do not screen-share it without checking that.
 
 Deletion is a deliberate operator decision. Nothing here is auto-deleted.
 """
@@ -81,9 +87,10 @@ Deletion is a deliberate operator decision. Nothing here is auto-deleted.
 # ============================================================
 # CREDENTIAL CLASSIFICATION
 # ============================================================
-# Header names whose VALUES authenticate the operator's live session. These are
-# never written into generated source. The generated client asks for them from
-# the environment at runtime instead.
+# Header names whose VALUES authenticate the operator's live session. The
+# capture records that such a header was PRESENT, by name, and never its value.
+# Phase 3's generator reads the same classification so a generated client asks
+# for them from the environment instead of carrying a captured session.
 SENSITIVE_HEADERS = {
     "authorization", "proxy-authorization", "www-authenticate", "authentication",
     "cookie", "set-cookie", "cookie2",
@@ -156,28 +163,6 @@ class InvestigationScope:
                 "query strings", "screenshots", "HTML snapshots", "DOM structure",
             ],
         }
-
-
-def _split_captured_url(url: str) -> tuple[str, list[str], list[str]]:
-    """Split a captured URL into an endpoint and its parameter NAMES.
-
-    Query-string values are discarded, never emitted into generated source. A
-    GET form submission puts every field in the query string, so a captured URL
-    routinely carries passwords, CSRF tokens and personal data.
-
-    Returns (endpoint_url_without_query, all_param_names, credential_param_names).
-    """
-    parsed = urlparse(url)
-    endpoint = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    names: list[str] = []
-    for pair in parsed.query.split("&"):
-        if not pair:
-            continue
-        name = pair.split("=", 1)[0]
-        if name and name not in names:
-            names.append(name)
-    sensitive = [n for n in names if is_sensitive_header(n)]
-    return endpoint, names, sensitive
 
 
 def _frame_id_of(frame) -> str | None:
@@ -788,7 +773,21 @@ class WebHarvester:
         if req.resource_type in CAPTURED_RESOURCE_TYPES and req.method != "OPTIONS":
             # Out of scope: record the status code, never read the body.
             if not self.scope.contains(req.url):
-                self._record_out_of_scope(req.method.upper(), req.url, status=response.status)
+                method = req.method.upper()
+                self._record_out_of_scope(method, req.url, status=response.status)
+                # The status has to reach the SPINE, not only the in-memory
+                # tally. The request side emits its own gap; without this one
+                # the log knows a third-party call happened but never how it
+                # answered, and the only record of that was a legacy JSON file.
+                parsed = urlparse(req.url)
+                self.emit_capture_gap(
+                    "out_of_scope",
+                    method=method,
+                    host=parsed.hostname,
+                    path=parsed.path or "/",
+                    status=response.status,
+                    withheld=["headers", "body", "query"],
+                )
                 return
 
             url_path = urlparse(req.url).path or "/"
@@ -1045,6 +1044,15 @@ class WebHarvester:
             frames_captured=len(results),
             frames_total=len(page.frames),
             forms=sum(len(r["data"].get("forms", [])) for r in results),
+            # WHICH frames were read, not just how many. dom_structure.json was
+            # the only record of that, and without it the log cannot answer
+            # "did the scan reach the nested iframe?" -- which is the question
+            # a cross-frame form is found or lost by. Every URL here is in
+            # scope by construction: the loop above skips the others.
+            frame_urls=[r["frame_url"] for r in results],
+            forms_by_frame={
+                r["frame_url"]: len(r["data"].get("forms", [])) for r in results
+            },
         )
 
     async def _eval_page_world(self, target, expression, *, default=None):
@@ -1145,122 +1153,13 @@ class WebHarvester:
             ),
         )
 
-    def generate_httpx_code(self) -> str:
-        """Generate an API client that contains NO captured credentials.
+    # generate_httpx_code lived here. It emitted generated_client.py, which
+    # is retired above. Its docstring promised the output carried no captured
+    # credentials; nothing in the code enforced that, and the only thing
+    # checking it was a golden-master summary of the file's text. Phase 3
+    # restores a generator that reads the derived model, with those promises
+    # as tests rather than prose.
 
-        Session-authenticating headers are recorded by NAME ONLY so the caller
-        knows what to supply, and are read from the environment at runtime.
-        TLS verification is never disabled.
-        """
-        observed_credential_headers: set[str] = set()
-        for meta in self.endpoints.values():
-            for name in meta["headers"]:
-                if is_sensitive_header(name):
-                    observed_credential_headers.add(name.lower().lstrip(":"))
-
-        cred_list = "\n".join(f"    - {name}" for name in sorted(observed_credential_headers)) \
-            or "    (none observed)"
-
-        preamble = f'''"""Auto-generated API client for {self.target_url}
-
-GENERATED FROM A CAPTURED SESSION — DO NOT COMMIT.
-
-This client deliberately contains NO captured credentials. The investigator
-observed these credential-bearing headers, by name only:
-{cred_list}
-
-Supply them at runtime:
-
-    SCRIPTSCRAP_AUTH_HEADERS   JSON object of header name -> value
-                               e.g. {{"authorization": "Bearer ..."}}
-    SCRIPTSCRAP_COOKIE         raw Cookie header value
-    SCRIPTSCRAP_CA_BUNDLE      path to a CA bundle, if the portal uses a
-                               private/corporate CA
-
-Captured example request bodies are NOT embedded here either. Look them up in
-mcma_openapi_spec.json in this directory, and pass one as `payload`.
-"""
-import asyncio  # noqa: F401  (for callers driving these coroutines)
-import json
-import os
-
-import httpx
-
-
-def _verify():
-    """TLS verification is always on. A private CA is supplied by path."""
-    return os.environ.get("SCRIPTSCRAP_CA_BUNDLE") or True
-
-
-def _auth_headers() -> dict:
-    """Session credentials, from the environment — never from capture."""
-    headers = {{}}
-    raw = os.environ.get("SCRIPTSCRAP_AUTH_HEADERS")
-    if raw:
-        headers.update(json.loads(raw))
-    cookie = os.environ.get("SCRIPTSCRAP_COOKIE")
-    if cookie:
-        headers["cookie"] = cookie
-    if not headers:
-        raise RuntimeError(
-            "No credentials supplied. Set SCRIPTSCRAP_AUTH_HEADERS and/or "
-            "SCRIPTSCRAP_COOKIE. This client intentionally does not embed the "
-            "session credentials that were captured during the investigation."
-        )
-    return headers
-'''
-
-        code_blocks = [preamble]
-        used_names: dict[str, int] = {}
-
-        for idx, ((method, path), meta) in enumerate(self.endpoints.items()):
-            base_name = re.sub(r"[^a-zA-Z0-9_]+", "_", f"{method.lower()}_{path.strip('/')}") or f"req_{idx}"
-            # Distinct endpoints must not silently shadow one another.
-            count = used_names.get(base_name, 0)
-            used_names[base_name] = count + 1
-            fn_name = base_name if count == 0 else f"{base_name}__{count + 1}"
-
-            safe_headers = {
-                k: v for k, v in meta["headers"].items()
-                if not k.startswith(":")
-                and k.lower() not in ("content-length", "host")
-                and not is_sensitive_header(k)
-            }
-
-            # A GET form submission puts every field in the query string, so the
-            # captured URL can carry passwords, CSRF tokens and personal data.
-            # Emit the endpoint, never the captured values: keep scheme/host/path
-            # and document the parameter NAMES so the caller knows what to pass.
-            endpoint_url, param_names, sensitive_params = _split_captured_url(meta["url"])
-            observed_credential_headers.update(sensitive_params)
-
-            param_doc = ""
-            if param_names:
-                param_doc = (
-                    f"\n\n    Observed query parameters (names only, values not retained):"
-                    f"\n        {', '.join(param_names)}"
-                )
-                if sensitive_params:
-                    param_doc += (
-                        f"\n    Credential-shaped, must be supplied by the caller:"
-                        f"\n        {', '.join(sensitive_params)}"
-                    )
-
-            fn = f'''
-async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: dict = None):
-    """{method} {path}  ·  observed statuses: {sorted(meta["statuses"]) or "none"}{param_doc}
-    """
-    url = "{endpoint_url}"
-    headers = {json.dumps(safe_headers, indent=4)}
-    headers.update(_auth_headers())
-    if custom_headers:
-        headers.update(custom_headers)
-    async with httpx.AsyncClient(verify=_verify()) as client:
-        res = await client.{method.lower()}(url, headers=headers, params=params, json=payload)
-        return res.json() if "application/json" in res.headers.get("content-type", "") else res.text
-'''
-            code_blocks.append(fn.strip() + "\n")
-        return "\n".join(code_blocks)
 
     # ==========================================
     # SESSION MANIFEST
@@ -1395,15 +1294,19 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
                 "dependency_edges": len(self.value_dependencies),
             },
             "event_spine": {
-                "mode": "dual_write",
+                "mode": "authoritative",
                 "available": EVENTS_AVAILABLE,
                 "log": "events.jsonl" if self.event_log is not None else None,
                 "events_emitted": self.event_log.count if self.event_log is not None else 0,
                 "note": (
-                    "Events are written alongside the outputs above, incrementally, "
-                    "so an interrupted session still leaves a readable history. The "
-                    "structures in this manifest remain the behavioural authority; "
-                    "nothing reads the event log to produce them yet."
+                    "events.jsonl is the only record this session produces. Events "
+                    "are written incrementally, so an interrupted session still "
+                    "leaves a readable history. The counts above are the "
+                    "investigator's own tally of what it observed; the knowledge "
+                    "derived from the log is produced by `scriptscrap analyze`, "
+                    "which cites the event ids behind every conclusion. The nine "
+                    "legacy JSON outputs that used to be the authority here were "
+                    "retired once the derived layer covered them."
                 ),
             },
             "snapshot_fidelity": {
@@ -1425,31 +1328,22 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
         # here rather than only in main(). Idempotent.
         _configure_stdout()
 
-        (OUTPUT_DIR / "network_traffic.json").write_text(json.dumps(self.network_log, indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "dom_structure.json").write_text(json.dumps(self.dom_snapshots, indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "api_dependencies.json").write_text(json.dumps(self.value_dependencies, indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "generated_client.py").write_text(self.generate_httpx_code(), encoding="utf-8")
-        
-        # New Introspection Dumps
-        (OUTPUT_DIR / "dropdown_catalogs.json").write_text(json.dumps(getattr(self, 'catalogs', {}), indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "jquery_events.json").write_text(json.dumps(getattr(self, 'jquery_events', {}), indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "js_hooks_and_mutations.json").write_text(json.dumps({"function_calls": getattr(self, 'js_hooks', []), "dom_mutations": getattr(self, 'mutations', [])}, indent=2), encoding="utf-8")
-
-        # OpenAPI Spec
-        openapi_spec = {
-            "openapi": "3.0.0",
-            "info": {"title": "MCMA Auto-Synthesized API", "version": "1.0"},
-            "paths": self.openapi_paths
-        }
-        (OUTPUT_DIR / "mcma_openapi_spec.json").write_text(json.dumps(openapi_spec, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        # Metadata-only record of traffic outside the engagement boundary.
-        out_of_scope_serialisable = {
-            key: {**entry, "statuses": sorted(entry["statuses"])}
-            for key, entry in self.out_of_scope.items()
-        }
-        (OUTPUT_DIR / "out_of_scope_metadata.json").write_text(
-            json.dumps(out_of_scope_serialisable, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Nine files used to be written here -- network_traffic.json,
+        # dom_structure.json, api_dependencies.json, generated_client.py,
+        # dropdown_catalogs.json, jquery_events.json,
+        # js_hooks_and_mutations.json, mcma_openapi_spec.json and
+        # out_of_scope_metadata.json. They predate the event spine and every
+        # fact in them is now derived by `scriptscrap analyze`, which cites the
+        # event ids behind each conclusion instead of asserting it.
+        #
+        # They are gone rather than deprecated because two output contracts
+        # means every later change has to be made twice, and a reader has to
+        # know which one is current. The out-of-scope statuses those files were
+        # the only record of now reach the spine from handle_response.
+        #
+        # A client generator returns in Phase 3, generated from the derived
+        # model and tested -- the retired one asserted its own safety in a
+        # docstring with nothing checking it.
 
         # Session manifest: makes the evidence self-describing.
         (OUTPUT_DIR / "session_manifest.json").write_text(
@@ -1552,8 +1446,8 @@ async def attach_engine_to_page(page, engine):
     # the fallback for a browser that does not isolate worlds.
     await page.add_init_script(HOOK_AND_OBSERVER_JS)
 
-    # Network capture stays on the engine: it also feeds the exporters that
-    # remain the behavioural authority.
+    # Network capture stays on the engine: it also feeds the running tally the
+    # session manifest reports.
     context.on("request", engine.handle_request)
     context.on("response", engine.handle_response)
     context.on("requestfailed", engine.handle_request_failed)
