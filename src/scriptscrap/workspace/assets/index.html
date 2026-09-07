@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScriptScrap — Investigation Workspace</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="app" hidden>
+  <header id="topbar">
+    <span id="brand">ScriptScrap</span>
+    <select id="session-picker" aria-label="Session"></select>
+    <span id="redaction" class="badge"></span>
+    <span id="session-stats"></span>
+  </header>
+  <div id="layout">
+    <nav id="rail" aria-label="Views"></nav>
+    <main id="content" tabindex="-1"></main>
+  </div>
+</div>
+<noscript>The workspace needs JavaScript. The same data is in
+<code>analysis/report.md</code> and <code>session.sqlite</code>.</noscript>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
