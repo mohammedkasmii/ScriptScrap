@@ -538,8 +538,43 @@ def technologies(workspace, query) -> dict:
         conn.close()
 
 
+# --- generated starting points --------------------------------------------
+
+def generate(workspace, query) -> dict:
+    """Render a generator's output for the open session.
+
+    Generated in memory and returned as text. The workspace writes nothing:
+    it is read-only, and a viewer that dropped files into the operator's
+    session directory would be neither.
+
+    This re-runs analysis rather than reading the derived store, because the
+    generators take an `AnalysisResult` and rebuilding one from SQL rows would
+    be a second, drifting deserialiser for the same model.
+    """
+    from ..analysis import analyze_log
+    from ..generate import render_client, render_playwright
+
+    handle = _handle(workspace, query)
+    kind = _one(query, "kind", "client")
+    renderers = {"client": render_client, "playwright": render_playwright}
+    if kind not in renderers:
+        raise BadRequest(f"unknown generator {kind!r}; try one of {sorted(renderers)}")
+
+    result = analyze_log(handle.log_path)
+    source = renderers[kind](result, session_name=handle.name)
+    return {
+        "kind": kind,
+        "filename": "generated_client.py" if kind == "client" else "observed_workflow.py",
+        "source": source,
+        "endpoints": len(result.endpoints),
+        "states": len(result.states),
+        "auth_headers": sorted(result.auth_headers),
+    }
+
+
 ROUTES = {
     "sessions": sessions,
+    "generate": generate,
     "session": session_overview,
     "endpoints": endpoints,
     "endpoint": endpoint_detail,

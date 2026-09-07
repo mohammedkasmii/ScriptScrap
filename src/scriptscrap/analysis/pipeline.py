@@ -57,9 +57,30 @@ def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
     result.activities = Reconciler().analyze(events)
     result.health = HealthAnalyzer().analyze(events).to_dict()
     result.scripts = _script_inventory(events)
+    result.auth_headers = _auth_headers(events)
 
     result.findings = _findings(events, result)
     return result
+
+
+def _auth_headers(events: list[Event]) -> dict[str, int]:
+    """Which credential-bearing headers the application sent, and how often.
+
+    NAMES only. The capture classifies a header as credential-bearing and
+    records that it was present; it never records the value. That asymmetry is
+    the whole point -- it is what lets a generated client state "this API
+    authenticates with a Cookie header" without ever having held the operator's
+    session.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for event in events:
+        if event.type is not EventType.HTTP_REQUEST:
+            continue
+        if event.payload.get("evidence_reduced"):
+            continue          # out of scope: not our application's contract
+        for name in event.payload.get("credential_header_names") or []:
+            counts[str(name).lower()] += 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def _script_inventory(events: list[Event]) -> list[dict]:

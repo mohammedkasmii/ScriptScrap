@@ -280,6 +280,11 @@ class AnalysisResult:
     activities: list[Any] = field(default_factory=list)
     health: dict[str, Any] | None = None
     scripts: list[dict[str, Any]] = field(default_factory=list)
+    # Credential-bearing header NAMES the application sent, and how often.
+    # Names only -- the capture never records their values. This is what lets a
+    # generated client say "this API needs a Cookie header, supply it from the
+    # environment" without ever having held the operator's session.
+    auth_headers: dict[str, int] = field(default_factory=dict)
     # The evidence index. One entry per event: the envelope plus where its line
     # lives in events.jsonl, so a conclusion can be walked back to its raw
     # evidence with a seek rather than a re-parse of the whole log. Empty when

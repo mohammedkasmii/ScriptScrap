@@ -110,6 +110,39 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 0
 
 
+GENERATORS = {
+    "client": ("generated_client.py", "an httpx client"),
+    "playwright": ("observed_workflow.py", "a Playwright starting point"),
+}
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    """Turn the derived model into a runnable starting point."""
+    from .generate import render_client, render_playwright
+
+    session = Path(args.session)
+    log = _resolve_log(session)
+    root = log.parent
+    result = analyze_log(log)
+
+    render = render_client if args.kind == "client" else render_playwright
+    filename, description = GENERATORS[args.kind]
+    source = render(result, session_name=root.name)
+
+    target = Path(args.output) if args.output else root / filename
+    target.write_text(source, encoding="utf-8")
+
+    print(f"wrote {description}  {target}")
+    print(f"  derived from {result.event_count} events, "
+          f"{len(result.endpoints)} endpoint(s), {len(result.states)} state(s)")
+    if result.auth_headers:
+        print(f"  this API authenticated with: {', '.join(sorted(result.auth_headers))}")
+        print("  supply them via SCRIPTSCRAP_AUTH_HEADERS; no value was captured")
+    print("\nThis describes ONE observed session. Routes nobody visited are "
+          "not in it.")
+    return 0
+
+
 def cmd_workspace(args: argparse.Namespace) -> int:
     """Serve a browsable, read-only view of one or more sessions."""
     from .workspace import SessionError, Workspace, WorkspaceConfig
@@ -179,6 +212,14 @@ def build_parser() -> argparse.ArgumentParser:
     workspace.add_argument("--no-open", action="store_true",
                            help="do not open a browser")
     workspace.set_defaults(func=cmd_workspace)
+
+    generate = sub.add_parser(
+        "generate", help="derive a runnable starting point from an analysed session")
+    generate.add_argument("kind", choices=sorted(GENERATORS),
+                          help="client: an httpx client. playwright: a browser script.")
+    generate.add_argument("session", help="session directory or events.jsonl path")
+    generate.add_argument("-o", "--output", help="write here instead of the session directory")
+    generate.set_defaults(func=cmd_generate)
 
     return parser
 

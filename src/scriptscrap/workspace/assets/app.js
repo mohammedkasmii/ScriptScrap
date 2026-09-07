@@ -15,6 +15,7 @@ import * as elements from './views/elements.js';
 import * as schemas from './views/schemas.js';
 import * as dependencies from './views/dependencies.js';
 import * as technology from './views/technology.js';
+import * as generate from './views/generate.js';
 
 const VIEWS = [
   ['overview', overview],
@@ -25,6 +26,7 @@ const VIEWS = [
   ['schemas', schemas],
   ['dependencies', dependencies],
   ['technology', technology],
+  ['generate', generate],
 ];
 
 const byName = new Map(VIEWS);

@@ -25,7 +25,7 @@ ASSETS = Path(__file__).resolve().parents[1] / "src" / "scriptscrap" / "workspac
 
 EXPECTED_VIEWS = {
     "overview.js", "timeline.js", "endpoints.js", "states.js",
-    "elements.js", "schemas.js", "dependencies.js", "technology.js",
+    "elements.js", "schemas.js", "dependencies.js", "technology.js", "generate.js",
 }
 EXPECTED_LIB = {"dom.js", "api.js", "evidence.js", "graph.js"}
 
@@ -120,6 +120,7 @@ def test_the_redaction_badge_is_wired_to_the_api():
     ("schemas.js", "schemas"),
     ("dependencies.js", "dependencies"),
     ("technology.js", "technologies"),
+    ("generate.js", "generate"),
 ])
 def test_each_view_calls_its_route(view, route):
     source = (ASSETS / "views" / view).read_text(encoding="utf-8")
@@ -139,10 +140,14 @@ def test_every_route_a_view_calls_actually_exists():
 
 def test_views_render_evidence_rather_than_only_stating_facts():
     """The property that separates this from the retired JSON files."""
-    exempt = {"technology.js"}   # uses evidenceList inside a table cell
+    # generate.js renders generated source, which cites no single event; the
+    # provenance it shows is the whole session, named in the file header.
+    exempt = {"technology.js", "generate.js"}
     for path in sorted((ASSETS / "views").glob("*.js")):
         source = path.read_text(encoding="utf-8")
-        if path.name in exempt:
+        if path.name == "technology.js":
             assert "evidenceList" in source
+            continue
+        if path.name in exempt:
             continue
         assert "evidence" in source.lower(), f"{path.name} never surfaces evidence"
