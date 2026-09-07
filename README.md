@@ -122,26 +122,92 @@ with sample counts, scored dependency hypotheses, locator candidates with
 measured stability, observed states, and technology fingerprints. Every
 conclusion cites the raw `event_id`s that support it.
 
+It also writes an **evidence index**: one row per event holding the envelope and
+the byte offset of its line in `events.jsonl`. Payloads are never copied, so the
+log stays the only source of truth — but a conclusion can be walked back to the
+events behind it with a seek instead of a re-parse. The run records the log's
+size and sha256, and a reader refuses to serve evidence against a log those no
+longer match rather than returning whatever now sits at that offset.
+
 `export` writes a **sanitised** dataset: credentials removed, identifiers and
 emails replaced by deterministic pseudonyms so value propagation stays
 analysable, and no raw bodies, screenshots or HTML.
 
+## Browsing a session
+
+```bash
+uv run scriptscrap workspace v13_investigation_output
+```
+
+Opens a local viewer over the analysed session: overview and capture health,
+timeline, endpoints, states, UI elements, schemas, dependencies, technology.
+Every record drills through to the raw events that support it.
+
+The path may be one session directory or a parent holding several.
+
+It is **read-only and loopback-only**. Because the directory it serves is an
+unredacted capture of an authenticated session:
+
+* it binds `127.0.0.1` and refuses any other host
+* every `/api/` route requires a token minted for that launch — "only local
+  processes can reach it" is not "only you can reach it"
+* `POST`/`PUT`/`DELETE`/`PATCH` are rejected unconditionally; no route mutates
+  anything
+* the page header states **UNREDACTED** or **SANITISED**, because a session
+  directory and its `export/shared` twin are indistinguishable in a screenshot
+
+No runtime dependency was added for any of it, and nothing is loaded from a
+CDN — the workspace works on a disconnected machine.
+
+## Generating a starting point
+
+```bash
+uv run scriptscrap generate client     v13_investigation_output
+uv run scriptscrap generate playwright v13_investigation_output
+```
+
+`client` writes an httpx client with a method per observed route. `playwright`
+writes the observed workflow using the most stable locator for each element.
+
+Both read the derived model and never the event log, so neither can embed a
+captured value. Credentials are read from the environment at runtime:
+
+```bash
+export SCRIPTSCRAP_AUTH_HEADERS='{"Cookie": "..."}'
+export SCRIPTSCRAP_BASE_URL=https://...
+```
+
+**These are derived suggestions, not specifications.** They describe one
+observed session: a route nobody visited is not in them, and a parameter nobody
+varied is inferred from a single value's shape. The generated Playwright script
+contains no assertions — the capture recorded what the application did, never
+what it should do — and it flags two different problems in place:
+
+* `UNSTABLE` — the locator was already ambiguous when observed
+* `VOLATILE` — the locator was unambiguous then and will be wrong later,
+  because it carries a UUID, a timestamp or a row id
+
 ## Layout
 
 ```
-camoufox/camoufox_investigator.py   the investigator (behavioural authority)
+camoufox/camoufox_investigator.py   the investigator (capture)
 src/scriptscrap/
   baseline.py  the pinned browser build, asserted by the doctor and the manifest
   events/      append-only event spine + offline reader
   sensors/     observation sensors (lifecycle, runtime, websocket, storage)
+               scope.py holds the boundary rule every sensor applies
   probe/       the injected in-page observer, in two JS-world roles
   analysis/    OFFLINE inference: endpoints, schemas, correlation, selectors,
                states, technology, reconciliation, capture health.
+               events_index.py is the only module that knows byte offsets exist.
                Imports no browser -- enforced by test.
+  workspace/   read-only local viewer: stdlib server + no-build-step frontend.
+               Imports no browser -- same test.
+  generate/    derived suggestions: an httpx client, a Playwright starting point
   extension/   optional Firefox forensic sensor (MV2) + loopback transport
   storage/     content-addressed blob store for raw evidence
   export/      sanitised shareable dataset
-  cli.py       scriptscrap analyze / export
+  cli.py       scriptscrap analyze / export / workspace / generate
   fixture/     deterministic local app used as the test laboratory
   testing/     scripted capture, normalisation, golden snapshots
 diagnostics/   compatibility probes + environment doctor

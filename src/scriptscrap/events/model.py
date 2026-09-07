@@ -14,9 +14,10 @@ Two rules the rest of the system depends on:
    belongs to a derived layer that cites these events by id -- not to the events
    themselves.
 
-During M1 this runs in DUAL-WRITE mode: the existing investigator structures
-remain the behavioural authority and the event log is written alongside them, so
-the model can be proven against real runs before anything depends on it.
+This log is the only record a session produces. It was dual-written alongside
+the legacy JSON outputs while the model was proven against real runs; those
+were retired once the derived layer covered them, so everything downstream now
+depends on this envelope being right.
 """
 
 from __future__ import annotations
