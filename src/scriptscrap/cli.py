@@ -110,6 +110,41 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_workspace(args: argparse.Namespace) -> int:
+    """Serve a browsable, read-only view of one or more sessions."""
+    from .workspace import SessionError, Workspace, WorkspaceConfig
+
+    root = Path(args.session)
+    try:
+        workspace = Workspace(WorkspaceConfig(root=root, port=args.port))
+    except SessionError as exc:
+        raise SystemExit(str(exc)) from None
+
+    unredacted = [s for s in workspace.sessions if s.redaction == "unredacted"]
+    print(f"serving  {workspace.url}")
+    print(f"         loopback only ({workspace.address[0]})\n")
+    for handle in workspace.sessions:
+        print(f"  {handle.name}  [{handle.redaction.upper()}]")
+    if unredacted:
+        # Said at the point of exposure, not only in a file nobody opens.
+        print("\n  ⚠  This serves an unredacted capture of an authenticated session:")
+        print("     live credentials, full bodies, screenshots. The page says so in")
+        print("     its header. Do not screen-share without checking that.")
+    print("\nCtrl+C to stop.")
+
+    if not args.no_open:
+        import webbrowser
+        webbrowser.open(workspace.url)
+
+    try:
+        workspace.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped.")
+    finally:
+        workspace.shutdown()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scriptscrap",
@@ -134,6 +169,16 @@ def build_parser() -> argparse.ArgumentParser:
     health = sub.add_parser("health", help="print the capture-health assessment")
     health.add_argument("session", help="session directory or events.jsonl path")
     health.set_defaults(func=cmd_health)
+
+    workspace = sub.add_parser(
+        "workspace", help="browse an analysed session in a local read-only viewer")
+    workspace.add_argument(
+        "session", help="a session directory, or a directory holding several")
+    workspace.add_argument("--port", type=int, default=0,
+                           help="port to listen on (default: an ephemeral one)")
+    workspace.add_argument("--no-open", action="store_true",
+                           help="do not open a browser")
+    workspace.set_defaults(func=cmd_workspace)
 
     return parser
 
