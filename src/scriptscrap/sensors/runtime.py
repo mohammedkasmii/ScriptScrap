@@ -16,9 +16,7 @@ them with network events; that is M3's job over the recorded log.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 from ..events import EventType, Source
 from ..probe import (
@@ -29,6 +27,12 @@ from ..probe import (
     build_main_world_script,
 )
 from .identity import PageRegistry
+from .scope import (
+    REDUCED_KEEP_KEYS,
+    URL_PAYLOAD_KEYS,
+    redact_stack_frame,
+    strip_query,
+)
 
 # Probe record type -> spine event type. A record whose type is not here is
 # recorded as a sensor error rather than silently dropped.
@@ -63,54 +67,9 @@ PROBE_EVENT_TYPES: dict[str, EventType] = {
 # The same policy as the Playwright path applies here: out of scope means
 # metadata only.
 
-# Payload keys that hold a URL. Any of them is stripped of query and fragment
-# when its own host is out of scope, wherever it appears.
-URL_PAYLOAD_KEYS = ("url", "action", "from", "frame_url")
-
-# Everything a reduced (out-of-scope) event may keep. An allowlist, because a
-# denylist silently admits every payload key added later.
-REDUCED_KEEP_KEYS = frozenset({
-    "method", "status", "via", "op", "store", "async", "count", "overflow",
-    "probe_ordinal", "probe_world", "probe_time_ms", "probe_time_origin",
-    "is_top_frame",
-})
-
-# A URL inside a stack frame, e.g. `handler@https://host/app.js?v=3:12:5`.
-_STACK_URL = re.compile(r"https?://[^\s)]+")
-
-
-def _strip_query(url: str) -> str:
-    """`https://h/p?a=secret#frag` -> `https://h/p`. Origin and path survive."""
-    parsed = urlsplit(url)
-    if not parsed.scheme and not parsed.netloc:
-        return url.split("?", 1)[0].split("#", 1)[0]
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-
-
-def _redact_stack_frame(scope: Any, frame: Any) -> Any:
-    """Strip query values from any out-of-scope script URL inside a stack frame.
-
-    A stack is the evidence for WHICH code made a call, and that is worth
-    keeping. The parameters on a third-party script's URL are not.
-    """
-    if not isinstance(frame, str):
-        return frame
-
-    def replace(match: re.Match) -> str:
-        # A frame is `...url:line:column`; the trailing position is not part of
-        # the URL and must survive the strip.
-        raw = match.group(0)
-        position = ""
-        while raw and raw[-1].isdigit():
-            head, _, tail = raw.rpartition(":")
-            if not head or not tail.isdigit():
-                break
-            position = ":" + tail + position
-            raw = head
-        return (raw if scope.contains(raw) else _strip_query(raw)) + position
-
-    return _STACK_URL.sub(replace, frame)
-
+# The reduction itself lives in `scope.py`: the lifecycle sensor needs the same
+# policy, and a boundary rule that exists in only one sensor is a boundary rule
+# with a hole in it.
 
 DEFAULT_PROBE_CONFIG = {
     "maxBuffer": 500,
@@ -310,11 +269,11 @@ class RuntimeSensor:
         for key in URL_PAYLOAD_KEYS:
             value = payload.get(key)
             if isinstance(value, str) and value and not scope.contains(value):
-                payload[key] = _strip_query(value)
+                payload[key] = strip_query(value)
 
         stack = payload.get("stack")
         if isinstance(stack, list):
-            payload["stack"] = [_redact_stack_frame(scope, f) for f in stack]
+            payload["stack"] = [redact_stack_frame(scope, f) for f in stack]
 
         subject = (payload.get("url") or payload.get("action")
                    or payload.get("frame_url"))
@@ -332,7 +291,7 @@ class RuntimeSensor:
                 # was keeping the full in-scope `from` URL beside it. The
                 # in-scope side of that navigation is recorded on the in-scope
                 # path anyway, so nothing is actually lost here.
-                reduced[key] = _strip_query(value)
+                reduced[key] = strip_query(value)
         removed = sorted(k for k in payload if k not in reduced)
         reduced["scope"] = "out_of_scope"
         reduced["evidence_reduced"] = True

@@ -16,7 +16,13 @@ import json
 
 import pytest
 
-from scriptscrap.sensors.runtime import RuntimeSensor, _redact_stack_frame, _strip_query
+from scriptscrap.sensors.runtime import RuntimeSensor
+
+# These moved to `sensors.scope` when the lifecycle sensor was found to need the
+# same policy. The assertions below are unchanged, which is what proves the
+# move altered no behaviour.
+from scriptscrap.sensors.scope import redact_stack_frame as _redact_stack_frame
+from scriptscrap.sensors.scope import strip_query as _strip_query
 
 TARGET = "https://app.test"
 THIRD_PARTY = "https://analytics.elsewhere.test"
