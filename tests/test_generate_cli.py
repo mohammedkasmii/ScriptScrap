@@ -111,3 +111,39 @@ def test_the_route_writes_nothing_to_disk(workspace, session):
 
 def test_the_route_reports_the_auth_headers(workspace):
     assert "cookie" in api.generate(workspace, {"kind": ["client"]})["auth_headers"]
+
+
+# --- the compile post-condition -------------------------------------------
+
+def test_a_generator_that_cannot_compile_writes_nothing(tmp_path, monkeypatch):
+    """A broken file discovered at `python observed_workflow.py` is too late."""
+    from scriptscrap import cli
+    from scriptscrap.generate import GeneratedSourceError
+
+    root = tmp_path / "session"
+    root.mkdir()
+    shutil.copy(SAMPLE, root / "events.jsonl")
+
+    def explode(result, *, session_name):
+        raise GeneratedSourceError("observed_workflow.py would not compile: boom")
+
+    monkeypatch.setattr(cli, "_render_for", lambda kind: explode)
+
+    args = cli.build_parser().parse_args(["generate", "playwright", str(root)])
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+    assert "would not compile" in str(excinfo.value)
+    assert not (root / "observed_workflow.py").exists()
+
+
+def test_the_route_reports_a_generator_that_cannot_compile(workspace, monkeypatch):
+    """The workspace surfaces it as a 400 rather than a 500 with a traceback."""
+    from scriptscrap.generate import GeneratedSourceError
+
+    def explode(result, *, session_name):
+        raise GeneratedSourceError("generated_client.py would not compile: boom")
+
+    monkeypatch.setattr("scriptscrap.generate.render_client", explode)
+    with pytest.raises(api.BadRequest) as excinfo:
+        api.generate(workspace, {"kind": ["client"]})
+    assert "would not compile" in str(excinfo.value)

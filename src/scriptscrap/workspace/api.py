@@ -552,7 +552,7 @@ def generate(workspace, query) -> dict:
     be a second, drifting deserialiser for the same model.
     """
     from ..analysis import analyze_log
-    from ..generate import render_client, render_playwright
+    from ..generate import GeneratedSourceError, render_client, render_playwright
 
     handle = _handle(workspace, query)
     kind = _one(query, "kind", "client")
@@ -561,7 +561,12 @@ def generate(workspace, query) -> dict:
         raise BadRequest(f"unknown generator {kind!r}; try one of {sorted(renderers)}")
 
     result = analyze_log(handle.log_path)
-    source = renderers[kind](result, session_name=handle.name)
+    try:
+        source = renderers[kind](result, session_name=handle.name)
+    except GeneratedSourceError as exc:
+        # A generator that cannot produce valid Python is a 400 with the
+        # reason, not a 500 with a traceback in a screen-shared console.
+        raise BadRequest(str(exc)) from None
     return {
         "kind": kind,
         "filename": "generated_client.py" if kind == "client" else "observed_workflow.py",

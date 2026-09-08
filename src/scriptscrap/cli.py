@@ -116,18 +116,29 @@ GENERATORS = {
 }
 
 
+def _render_for(kind: str):
+    """The renderer for one generator kind. A seam, so a test can fail it."""
+    from .generate import render_client, render_playwright
+
+    return render_client if kind == "client" else render_playwright
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
     """Turn the derived model into a runnable starting point."""
-    from .generate import render_client, render_playwright
+    from .generate import GeneratedSourceError
 
     session = Path(args.session)
     log = _resolve_log(session)
     root = log.parent
     result = analyze_log(log)
 
-    render = render_client if args.kind == "client" else render_playwright
     filename, description = GENERATORS[args.kind]
-    source = render(result, session_name=root.name)
+    try:
+        source = _render_for(args.kind)(result, session_name=root.name)
+    except GeneratedSourceError as exc:
+        # Nothing is written. A file that does not compile is worse than no
+        # file: the reader discovers it three steps into a debugging session.
+        raise SystemExit(str(exc)) from None
 
     target = Path(args.output) if args.output else root / filename
     target.write_text(source, encoding="utf-8")

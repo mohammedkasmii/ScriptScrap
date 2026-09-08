@@ -176,7 +176,10 @@ def test_script_flags_the_locator_it_actually_chose_if_unstable():
         locators = [_Locator()]
 
     call, warning = _locator_call(_Element())
-    assert call == 'page.locator("#btn")'
+    # The locator value is emitted through `repr()` now, which quotes with
+    # apostrophes. What matters is that it is one inert literal, so the
+    # assertion is on the evaluated call rather than on the quote character.
+    assert call == "page.locator(" + repr("#btn") + ")"
     assert "UNSTABLE" in warning
     assert "50%" in warning
     assert "matched 2 nodes" in warning
@@ -256,9 +259,9 @@ def test_captured_labels_cannot_break_out_of_a_comment():
     all. Interpolated raw, the comment ends at the first newline and the rest
     of the label becomes code."""
     from scriptscrap.analysis.models import AnalysisResult, UIElement
-    from scriptscrap.generate.playwright import _comment_safe
+    from scriptscrap.generate.emit import py_comment
 
-    assert "\n" not in _comment_safe("Nom\nNotes\n Accord\n Bris")
+    assert "\n" not in py_comment("Nom\nNotes\n Accord\n Bris")
 
     hostile = AnalysisResult(session_id="s", event_count=1)
     # Hostile label text, never executed: it exists to prove that a captured
