@@ -57,6 +57,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     workspace: Workspace
     protocol_version = "HTTP/1.1"
+    # Set by `_authenticated` when the match came from the URL rather than the
+    # cookie. A class attribute so `_send` can read it on a request that never
+    # reached authentication at all.
+    _refresh_cookie = False
 
     # -- plumbing ----------------------------------------------------------
     def log_message(self, fmt: str, *args: object) -> None:
@@ -79,6 +83,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         )
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        if self._refresh_cookie:
+            self.send_header("Set-Cookie", self._cookie_header())
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -105,26 +111,58 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     # -- authentication ----------------------------------------------------
     def _authenticated(self, query: dict[str, list[str]]) -> bool:
-        """The token, from the cookie or the landing URL.
+        """The launch token, from the cookie or the landing URL.
 
-        Compared with `compare_digest` so a wrong token cannot be found one
-        character at a time.
+        Every candidate is checked, not just the first one found: a cookie from
+        a PREVIOUS launch is sent to this one -- browser cookies are not scoped
+        by port -- and consulting only the cookie meant a correct `?t=` in the
+        URL was ignored and every panel 401'd.
+
+        Compared as bytes with `compare_digest`, so a wrong token cannot be
+        found one character at a time and a non-ASCII one is a mismatch rather
+        than a TypeError.
         """
-        supplied = None
-        cookie = self.headers.get("Cookie", "")
-        for part in cookie.split(";"):
+        expected = self.workspace.token.encode("utf-8")
+        cookies = self._cookie_values()
+        for candidate in [*cookies, *(v for v in query.get("t", []) if v)]:
+            try:
+                supplied = candidate.encode("utf-8")
+            except (UnicodeError, AttributeError):
+                continue
+            if secrets.compare_digest(supplied, expected):
+                # A match that did NOT come from the cookie means the cookie is
+                # stale or absent. Refresh it, or the next request pays the
+                # same cost.
+                self._refresh_cookie = candidate not in cookies
+                return True
+        return False
+
+    def _cookie_values(self) -> list[str]:
+        """Every `scriptscrap_token` this request offered, in header order."""
+        found: list[str] = []
+        for part in self.headers.get("Cookie", "").split(";"):
             name, _, value = part.strip().partition("=")
-            if name == COOKIE_NAME:
-                supplied = value
-                break
-        if supplied is None and query.get("t"):
-            supplied = query["t"][0]
-        if supplied is None:
-            return False
-        return secrets.compare_digest(supplied, self.workspace.token)
+            if name == COOKIE_NAME and value:
+                found.append(value)
+        return found
+
+    def _cookie_header(self) -> str:
+        """The launch cookie. HttpOnly because no script reads it."""
+        return (f"{COOKIE_NAME}={self.workspace.token}; Path=/; "
+                "SameSite=Strict; HttpOnly")
 
     # -- routing -----------------------------------------------------------
     def do_GET(self) -> None:
+        try:
+            self._route()
+        except Exception as exc:                       # noqa: BLE001
+            # Nothing may reach socketserver: it prints a stack trace with
+            # absolute source paths onto a console this design deliberately
+            # keeps quiet, and drops the connection with no response.
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR,
+                        f"{type(exc).__name__}: {exc}")
+
+    def _route(self) -> None:
         split = urlsplit(self.path)
         path = unquote(split.path)
         query = parse_qs(split.query)

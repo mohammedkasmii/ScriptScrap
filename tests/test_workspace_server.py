@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import http.client
 import shutil
+import socket
 import threading
 from pathlib import Path
 
@@ -199,3 +200,133 @@ def test_the_dynamic_event_route_works_too(workspace):
     status, body = request(workspace, f"/api/event/{event_id}", token=workspace.token)
     assert status == 200
     assert _json.loads(body)["event"]["event_id"] == event_id
+
+
+# --- a malformed credential is an answer, not a crash (F10, F9) -----------
+
+def _raw_request(workspace, path: str, headers: dict[str, str]) -> tuple[int, bytes]:
+    """A request written to the socket verbatim.
+
+    `http.client` encodes header values as latin-1 and raises before sending
+    anything, so a test built on it proves only that the CLIENT rejects a
+    hostile value. What must be established here is that the SERVER survives
+    one, so the bytes go on the wire directly.
+    """
+    request = f"GET {path} HTTP/1.1\r\nHost: {workspace.address[0]}\r\n"
+    for name, value in headers.items():
+        request += f"{name}: {value}\r\n"
+    request += "Connection: close\r\n\r\n"
+
+    with socket.create_connection(workspace.address, timeout=5) as sock:
+        sock.sendall(request.encode("utf-8"))
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    raw = b"".join(chunks)
+    if not raw:
+        pytest.fail("the server closed the connection without a response")
+    head, _, body = raw.partition(b"\r\n\r\n")
+    return int(head.split()[1]), body
+
+
+@pytest.mark.parametrize("value", [
+    # Non-ASCII: `compare_digest` raises TypeError comparing str like these.
+    pytest.param("\u00e9\u00e9\u00e9", id="latin1-non-ascii"),
+    pytest.param("\u4f60\u597d", id="utf8-non-ascii"),
+    pytest.param("x" * 100_000, id="oversized"),
+    pytest.param("", id="empty"),
+    pytest.param("tok=en", id="embedded-separator"),
+])
+def test_a_malformed_token_is_rejected_without_a_traceback(workspace, value, capfd):
+    """secrets.compare_digest rejects non-ASCII str with TypeError, raised
+    from _authenticated -- which sits OUTSIDE the try/except that wraps the
+    API handlers. The connection was dropped with no response and socketserver
+    printed a stack trace with absolute source paths onto a console the design
+    says is routinely screen-shared."""
+    status, _ = _raw_request(workspace, "/api/sessions",
+                             {"Cookie": f"scriptscrap_token={value}"})
+    # 431 for the oversized header: BaseHTTPRequestHandler enforces its own
+    # limit and answers before the handler is reached. That is an answer, which
+    # is what this test is about -- not a dropped connection and a stack trace.
+    assert status in (401, 431), status
+    assert "Traceback" not in capfd.readouterr().err
+
+
+def test_the_server_survives_a_malformed_token(workspace):
+    _raw_request(workspace, "/api/sessions",
+                 {"Cookie": "scriptscrap_token=\u00e9"})
+    status, _ = request(workspace, "/api/sessions", token=workspace.token)
+    assert status == 200
+
+
+def test_an_unexpected_handler_error_is_a_500_not_a_dropped_connection(workspace,
+                                                                      monkeypatch):
+    def explode(_workspace, _query):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(workspace.routes, "sessions", explode)
+    status, body = request(workspace, "/api/sessions", token=workspace.token)
+    assert status == 500
+    assert b"RuntimeError" in body
+
+
+def test_a_stale_cookie_does_not_beat_a_correct_token(workspace):
+    """Browser cookies are not scoped by port, so 127.0.0.1:A and
+    127.0.0.1:B share a jar. The cookie a previous `scriptscrap workspace`
+    launch set was sent to the next one, and because the query token was
+    consulted only when NO cookie was present, every panel 401'd on the second
+    launch until the user cleared cookies by hand."""
+    conn = http.client.HTTPConnection(*workspace.address, timeout=5)
+    try:
+        conn.request("GET", f"/api/sessions?t={workspace.token}",
+                     headers={"Cookie": "scriptscrap_token=FROM-A-PREVIOUS-LAUNCH"})
+        response = conn.getresponse()
+        body = response.read()
+        assert response.status == 200, body
+        assert response.getheader("Set-Cookie"), \
+            "a correct query token must refresh the stale cookie"
+        assert workspace.token in response.getheader("Set-Cookie")
+    finally:
+        conn.close()
+
+
+def test_an_empty_cookie_does_not_beat_a_correct_token(workspace):
+    conn = http.client.HTTPConnection(*workspace.address, timeout=5)
+    try:
+        conn.request("GET", f"/api/sessions?t={workspace.token}",
+                     headers={"Cookie": "scriptscrap_token="})
+        assert conn.getresponse().status == 200
+    finally:
+        conn.close()
+
+
+def test_two_consecutive_launches_are_both_usable(session_root):
+    """The failure a real operator hits: launch, close, launch again."""
+    first = Workspace(WorkspaceConfig(root=session_root))
+    thread_a = threading.Thread(target=first.serve_forever, daemon=True)
+    thread_a.start()
+    second = Workspace(WorkspaceConfig(root=session_root))
+    thread_b = threading.Thread(target=second.serve_forever, daemon=True)
+    thread_b.start()
+    try:
+        # A browser holding the FIRST launch's cookie opens the SECOND's URL.
+        conn = http.client.HTTPConnection(*second.address, timeout=5)
+        try:
+            conn.request("GET", f"/api/sessions?t={second.token}",
+                         headers={"Cookie": f"scriptscrap_token={first.token}"})
+            assert conn.getresponse().status == 200
+        finally:
+            conn.close()
+    finally:
+        first.shutdown()
+        thread_a.join(timeout=5)
+        second.shutdown()
+        thread_b.join(timeout=5)
+
+
+def test_a_wrong_token_with_no_cookie_is_still_rejected(workspace):
+    status, _ = request(workspace, "/api/sessions?t=nope")
+    assert status == 401
