@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import Any
 
 from ..analysis.events_index import EventStore, StaleIndexError
@@ -88,6 +89,31 @@ def _store(handle: SessionHandle) -> EventStore:
             "the raw events it was derived from stay in the local session "
             "directory. Open that session to drill through to evidence.")
     return EventStore(handle.db_path, handle.log_path)
+
+
+@lru_cache(maxsize=4)
+def _analysis_cached(log_path: str, size: int, mtime_ns: int):
+    """Memoised by the log's identity, not by the session's.
+
+    Keyed on size and mtime as well as path: an appended log is a different
+    log, and serving a generator built from the previous one would describe a
+    session that no longer exists.
+    """
+    from ..analysis import pipeline
+
+    return pipeline.analyze_log(log_path)
+
+
+def _analysis_for(handle: SessionHandle):
+    """The AnalysisResult for one session, re-used across requests."""
+    if handle.log_path is None:
+        raise EvidenceUnavailable(
+            "this is a sanitised export; it has no event log to analyse")
+    stat = handle.log_path.stat()
+    return _analysis_cached(str(handle.log_path), stat.st_size, stat.st_mtime_ns)
+
+
+_analysis_for.cache_clear = _analysis_cached.cache_clear   # for tests
 
 
 def _run_id(conn) -> int:
@@ -601,9 +627,10 @@ def generate(workspace, query) -> dict:
 
     This re-runs analysis rather than reading the derived store, because the
     generators take an `AnalysisResult` and rebuilding one from SQL rows would
-    be a second, drifting deserialiser for the same model.
+    be a second, drifting deserialiser for the same model. The result is
+    memoised on the log's path, size and mtime, so re-rendering the view does
+    not re-analyse a log that has not changed.
     """
-    from ..analysis import analyze_log
     from ..generate import GeneratedSourceError, render_client, render_playwright
 
     handle = _handle(workspace, query)
@@ -612,7 +639,7 @@ def generate(workspace, query) -> dict:
     if kind not in renderers:
         raise BadRequest(f"unknown generator {kind!r}; try one of {sorted(renderers)}")
 
-    result = analyze_log(handle.log_path)
+    result = _analysis_for(handle)
     try:
         source = renderers[kind](result, session_name=handle.name)
     except GeneratedSourceError as exc:
