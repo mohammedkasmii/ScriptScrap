@@ -50,6 +50,13 @@ def script(result):
     return render_playwright(result, session_name="fixture")
 
 
+@pytest.fixture(scope="module")
+def script_of_empty():
+    from scriptscrap.analysis.models import AnalysisResult
+    return render_playwright(AnalysisResult(session_id="s", event_count=0),
+                             session_name="empty")
+
+
 # --- the analysis this rests on -------------------------------------------
 
 def test_auth_headers_are_derived_by_name(result):
@@ -151,10 +158,118 @@ def test_no_query_values_are_embedded(client, result):
 
 # --- the playwright script ------------------------------------------------
 
-def test_script_walks_observed_transitions(script, result):
-    if not result.transitions:
-        pytest.skip("this session derived no transitions")
-    assert "page.goto" in script or "page.click" in script or "locator" in script
+def test_the_script_fills_an_element_that_was_typed_into(result, script):
+    """0 fills for 19 user_input elements on the real capture, because
+    _action_for tested 'input' against an actions dict keyed 'user_input'."""
+    typed = [s for s in result.workflow if s.kind == "fill"]
+    assert typed, "the sample log records no typing"
+    assert script.count(".fill(") >= 1
+
+
+def test_every_workflow_kind_reaches_a_playwright_call(result, script):
+    calls = {
+        "click": ".click()",
+        "fill": ".fill(",
+        "select": ".select_option(",
+        "check": ".check()",
+        "submit": ".click()",
+        "navigate": "page.goto(",
+    }
+    for kind in {s.kind for s in result.workflow}:
+        if kind == "press":
+            continue          # covered by the two press tests below
+        assert calls[kind] in script, f"{kind} produced no call"
+
+
+def test_every_step_is_visible_in_the_script(result, script):
+    """One marker per workflow step, so the script IS the workflow. A press
+    with no recorded key still appears -- as a TODO, not as a call."""
+    body = script.split("def run(page)", 1)[1]
+    for step in result.workflow:
+        assert f"# step {step.ordinal}:" in body, f"step {step.ordinal} missing"
+    assert body.count("# step ") == len(result.workflow)
+
+
+def _one_step_result(**step_fields):
+    """A result holding one element and one step against it."""
+    from scriptscrap.analysis.models import (
+        AnalysisResult,
+        Evidence,
+        LocatorCandidate,
+        UIElement,
+        WorkflowStep,
+    )
+
+    element = UIElement(key="k", tag="input", role="textbox", label="Nom",
+                        text=None, form=None, observation_count=1,
+                        actions={"user_key": 1},
+                        locators=[LocatorCandidate(strategy="css", value="#nom",
+                                                   resolved_count=1, sample_count=1)],
+                        evidence=Evidence(event_ids=["e"]))
+    return AnalysisResult(
+        session_id="s", event_count=1, ui_elements=[element],
+        workflow=[WorkflowStep(ordinal=0, seq=1, element_key="k",
+                               evidence=Evidence(event_ids=["e"]), **step_fields)])
+
+
+def test_a_press_with_an_allowlisted_key_becomes_a_press_call():
+    source = render_playwright(_one_step_result(kind="press", key="Tab"),
+                               session_name="s")
+    assert ".press(" + repr("Tab") + ")" in source
+    compile(source, "observed_workflow.py", "exec")
+
+
+def test_a_press_with_no_recorded_key_emits_a_todo_and_no_call():
+    """press("Enter") for an unknown key is a keystroke the application never
+    received -- and Enter is the key most likely to submit a form."""
+    source = render_playwright(_one_step_result(kind="press", key=None),
+                               session_name="s")
+    # The TODO shows the operator the call to write; no line CALLS press.
+    assert not [line for line in source.splitlines()
+                if ".press(" in line and not line.lstrip().startswith("#")]
+    assert "TODO" in source
+    assert "# step 0: press" in source
+    compile(source, "observed_workflow.py", "exec")
+
+
+def test_the_script_starts_where_the_session_started(result, script):
+    """The entry state was chosen from a list sorted by observation count."""
+    first_navigate = next(s for s in result.workflow if s.kind == "navigate")
+    goto = next(line for line in script.splitlines() if "page.goto(" in line)
+    assert first_navigate.url_pattern in goto
+
+
+def test_steps_appear_in_observed_order(result, script):
+    """Not frequency order: the emitted order must match `ordinal`."""
+    body = script.split("def run(page)", 1)[1]
+    positions = []
+    for step in result.workflow:
+        marker = f"# step {step.ordinal}:"
+        assert marker in body, f"step {step.ordinal} was not emitted"
+        positions.append(body.index(marker))
+    assert positions == sorted(positions)
+
+
+def test_no_transition_claims_an_element_was_not_recorded_when_it_was(result, script):
+    """47 of 47 said so on the real capture, several naming a real element."""
+    keys = {e.key for e in result.ui_elements}
+    unjoined = [t for t in result.transitions
+                if t.trigger_element_key and t.trigger_element_key not in keys]
+    assert unjoined == []
+    for transition in result.transitions:
+        if transition.trigger_element_key in keys:
+            assert f"no element was recorded for {transition.trigger}" not in script
+
+
+def test_a_repeated_step_says_how_many_times(result, script):
+    repeated = [s for s in result.workflow if s.repeat_count > 1]
+    if not repeated:
+        pytest.skip("the sample log has no repeated step")
+    assert f"x{repeated[0].repeat_count}" in script
+
+
+def test_a_session_with_no_workflow_says_so(script_of_empty):
+    assert "no workflow to replay" in script_of_empty.lower()
 
 
 def test_script_flags_the_locator_it_actually_chose_if_unstable():

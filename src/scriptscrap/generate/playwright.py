@@ -160,17 +160,8 @@ def _locator_call(element: UIElement) -> tuple[str, str | None]:
     return call, " / ".join(notes) if notes else None
 
 
-def _action_for(element: UIElement) -> str:
-    actions = set(element.actions or [])
-    if "submit" in actions:
-        return "click"
-    if "input" in actions or "change" in actions:
-        return "fill"
-    return "click"
-
-
 def render_playwright(result: AnalysisResult, *, session_name: str) -> str:
-    """The generated script's source."""
+    """The generated script's source: the observed workflow, in order."""
     source = HEADER.format(
         when=datetime.now(UTC).isoformat(timespec="seconds"),
         module="observed_workflow",
@@ -179,72 +170,103 @@ def render_playwright(result: AnalysisResult, *, session_name: str) -> str:
                f"# name:    {py_comment(session_name, 100)}\n")
     source += RUN_PREAMBLE
 
-    lines: list[str] = []
-
-    entry = next((s for s in result.states if s.url_pattern), None)
-    if entry:
-        lines.append(f"    # state: {py_comment(entry.label, 80)}")
-        lines.append(
-            f"    page.goto(BASE_URL + {py_str(_path_of(entry.url_pattern))})")
-        lines.append("")
-
     by_key = {e.key: e for e in result.ui_elements}
-    steps = 0
-
-    # Walk transitions in the order they were observed, then any element that
-    # no transition covered -- a click that changed nothing is still something
-    # the operator did, and dropping it would silently shorten the workflow.
-    covered: set[str] = set()
+    # First transition per element: a later one is another visit, and naming
+    # several destinations for one step would say the step did all of them.
+    state_of: dict[str, object] = {}
     for transition in result.transitions:
-        element = by_key.get(transition.trigger)
-        target = next((s for s in result.states
-                       if s.fingerprint == transition.to_state), None)
-        if element is None:
-            lines.append("    # observed transition via "
-                         f"{py_comment(transition.trigger)}, but no element "
-                         "was recorded for it")
-            if target:
-                lines.append(f"    # state: {py_comment(target.label, 80)}")
-            lines.append("")
-            continue
-        covered.add(element.key)
-        lines.extend(_step(element, target))
-        steps += 1
+        if transition.trigger_element_key:
+            state_of.setdefault(transition.trigger_element_key, transition)
+    label_of = {s.fingerprint: s.label for s in result.states}
 
-    for element in result.ui_elements:
-        if element.key in covered:
-            continue
-        lines.extend(_step(element, None))
-        steps += 1
+    lines: list[str] = []
+    for step in result.workflow:
+        lines.extend(_step(step, by_key, state_of, label_of))
 
-    if not steps and not entry:
-        lines.append("    # This session reconstructed no states and no interactive")
-        lines.append("    # elements, so there is no workflow to replay. That is a")
-        lines.append("    # statement about the capture, not the application.")
-        lines.append("    return")
+    if not lines:
+        lines = [
+            "    # This session recorded no navigation and no user action, so",
+            "    # there is no workflow to replay. That is a statement about",
+            "    # the capture, not about the application.",
+            "    return",
+        ]
 
     return assert_compiles(source + "\n".join(lines) + FOOTER,
                            filename="observed_workflow.py")
 
 
-def _step(element: UIElement, target) -> list[str]:
-    call, warning = _locator_call(element)
-    action = _action_for(element)
-    label = py_comment(element.label or element.text or element.key)
+def _step(step, by_key, state_of, label_of) -> list[str]:
+    """One workflow step. Never more than one call, never fewer."""
+    repeat = f" x{step.repeat_count}" if step.repeat_count > 1 else ""
+    lines = [f"    # step {step.ordinal}: {step.kind}{repeat}"]
 
-    lines = [f"    # {py_comment(element.tag, 30)}: {label} "
-             f"(observed {element.observation_count}x)"]
+    if step.kind == "navigate":
+        lines.append("    page.goto(BASE_URL + "
+                     f"{py_str(_path_of(step.url_pattern or '/'))})")
+        lines.append("")
+        return lines
+
+    element = by_key.get(step.element_key)
+    if element is None:
+        # The step is real -- the event happened -- but the element it names is
+        # not in the derived model, so there is nothing to locate it by.
+        lines.append("    # no element was derived for this step; it is "
+                     "recorded and cannot be replayed")
+        lines.append("")
+        return lines
+
+    call, warning = _locator_call(element)
+    lines.append(f"    # {py_comment(element.tag, 30)}: "
+                 f"{py_comment(element.label or element.text or element.key)} "
+                 f"(observed {element.observation_count}x)")
     if warning:
         lines.append(f"    # {py_comment(warning, 120)}")
-    if action == "fill":
-        lines.append(f"    {call}.fill({py_str('')})  "
-                     "# value not recorded; supply your own")
+
+    action = _action_call(step)
+    if action is None:
+        lines.append("    # TODO: a key was pressed on this element. The "
+                     "capture did not record")
+        lines.append("    #       which key, or it was not one this generator "
+                     "will reproduce.")
+        lines.append(f"    #       Supply it yourself: {call}.press(...)")
     else:
-        lines.append(f"    {call}.click()")
-    if target:
-        lines.append(f"    # state: {py_comment(target.label, 80)}")
+        lines.append(f"    {call}{action}")
+
+    transition = state_of.get(step.element_key)
+    if transition is not None:
+        target = label_of.get(transition.to_state)
+        if target:
+            lines.append(f"    # state: {py_comment(target, 80)}")
     lines.append("")
     return lines
+
+
+def _action_call(step) -> str | None:
+    """The Playwright call for one workflow kind, or None if there is none.
+
+    Driven by `WorkflowStep.kind`, which analysis derived from the event type
+    and the element. The retired `_action_for` inspected `UIElement.actions`
+    -- whose keys are event-type names -- against a vocabulary of bare verbs,
+    so every element rendered as a click.
+
+    Returns None for a press whose key was not recorded or not allowlisted.
+    There is no call to write: the session did not observe which key, and
+    `press("Enter")` would be a keystroke the application never received.
+    """
+    if step.kind == "fill":
+        note = ("  # a value was typed here; its content was not recorded"
+                if step.value_recorded else "  # supply your own value")
+        return f".fill({py_str('')}){note}"
+    if step.kind == "select":
+        return (f".select_option({py_str('')})  # the chosen option was not "
+                "recorded; supply one")
+    if step.kind == "check":
+        return ".check()  # observed toggled; check() sets rather than toggles"
+    if step.kind == "press":
+        if step.key is None:
+            return None
+        return f".press({py_str(step.key)})"
+    return ".click()"
 
 
 def _path_of(url_pattern: str) -> str:
