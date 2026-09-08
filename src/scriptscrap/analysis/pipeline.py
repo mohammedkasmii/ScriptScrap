@@ -28,6 +28,7 @@ from .schema import SchemaInferrer
 from .selectors import SelectorAnalyzer
 from .states import StateAnalyzer
 from .technology import TechnologyAnalyzer, opaque_state_fields
+from .workflow import WorkflowAnalyzer
 
 
 def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
@@ -51,6 +52,7 @@ def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
     result.dependencies = CorrelationAnalyzer().analyze(events, endpoint_of)
     result.ui_elements = SelectorAnalyzer().analyze(events)
     result.states, result.transitions = StateAnalyzer().analyze(events)
+    result.workflow = WorkflowAnalyzer().analyze(events)
     # Forensic evidence, when present. A normal session yields empty lists and
     # a health report built from the sensors that did run -- analysis must
     # never require the extension.
@@ -288,5 +290,40 @@ def _findings(events: list[Event], result: AnalysisResult) -> list[Finding]:
             message=(f"{len(single)} endpoint(s) templated from a single concrete path; "
                      "the parameter is a guess from value shape alone"),
             count=len(single),
+        ))
+
+    # A generated `.fill("")` for eighteen fields looks like a script that will
+    # work. The capture does not hold input values and some steps have no
+    # measured locator; both belong here, where the project already says what
+    # it did not see.
+    # The join from a step to its element is TOTAL by construction -- both use
+    # `semantic_key` and the same tag gate -- so a step never fails to resolve.
+    # What a step can lack is a LOCATOR: an element with no id, name, label,
+    # text, dom_path or class yields zero locator candidates, and a generated
+    # script can record that step and not replay it.
+    without_locator = {e.key for e in result.ui_elements if not e.locators}
+    unreplayable = [s for s in result.workflow
+                    if s.element_key and s.element_key in without_locator]
+    if unreplayable:
+        findings.append(Finding(
+            kind="unreplayable_step", severity="warning",
+            message=(f"{len(unreplayable)} workflow step(s) reference an element "
+                     "with no measured locator; a generated script records them "
+                     "and cannot replay them"),
+            count=len(unreplayable),
+            evidence=Evidence(event_ids=[
+                eid for s in unreplayable[:20] for eid in s.evidence.event_ids[:1]]),
+        ))
+
+    typed = [s for s in result.workflow if s.value_recorded]
+    if typed:
+        findings.append(Finding(
+            kind="workflow_value_gap", severity="info",
+            message=(f"{len(typed)} workflow step(s) typed or chose a value that "
+                     "was not recorded by the capture; a generated script leaves "
+                     "them empty rather than inventing one"),
+            count=len(typed),
+            evidence=Evidence(event_ids=[
+                eid for s in typed[:20] for eid in s.evidence.event_ids[:1]]),
         ))
     return findings

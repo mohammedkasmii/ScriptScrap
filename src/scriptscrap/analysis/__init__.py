@@ -31,7 +31,7 @@ from .models import (
 )
 from .pipeline import analyze_events, analyze_log
 from .schema import SchemaInferrer
-from .selectors import SelectorAnalyzer, generated_id_warning
+from .selectors import SelectorAnalyzer, generated_id_warning, semantic_key
 from .states import StateAnalyzer, route_shape
 from .store import DerivedStore
 from .technology import TechnologyAnalyzer
@@ -64,4 +64,5 @@ __all__ = [
     "generated_id_warning",
     "normalize_field_tokens",
     "route_shape",
+    "semantic_key",
 ]

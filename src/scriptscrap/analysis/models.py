@@ -22,7 +22,9 @@ from typing import Any
 # Bumped when inference logic changes in a way that invalidates stored results.
 # 2: the derived store gained an events index (envelope + byte offset) and the
 #    run gained the log fingerprint those offsets are only valid against.
-ANALYSIS_VERSION = 2
+# 3: the derived model gained an ordered workflow and a machine-readable link
+#    from a state transition to the element that triggered it.
+ANALYSIS_VERSION = 3
 
 
 @dataclass(slots=True)
@@ -218,8 +220,66 @@ class AppState:
 class StateTransition:
     from_state: str
     to_state: str
+    # A human-readable label: f"{type} #{element id/label/text}". It carries
+    # page content, so it is for the local report and the workspace, and the
+    # shared export drops it. The three fields below are the machine-readable
+    # halves that survive.
     trigger: str
     observation_count: int
+    # The bare EventType that caused the move -- "user_click",
+    # "runtime_history" -- with no element name attached. A fixed constant, so
+    # it is exportable and a reader still learns what kind of thing moved the
+    # application.
+    trigger_type: str | None = None
+    # The element the trigger event happened on, as a semantic key that joins
+    # to UIElement.key. `trigger` is a label and is NOT an identity: a
+    # generator that joined on it matched nothing.
+    trigger_element_key: str | None = None
+    trigger_event_id: str | None = None
+    evidence: Evidence = field(default_factory=Evidence)
+
+
+WORKFLOW_KINDS = ("navigate", "click", "fill", "select", "check", "press", "submit")
+
+# Keys that may be reproduced in a generated script. Navigation and control
+# only: a keystroke is application-visible input and can be one character of a
+# password, so the default is that it does not leave.
+SAFE_KEYS = frozenset({
+    "Enter", "Tab", "Escape", "Backspace", "Delete",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "Home", "End", "PageUp", "PageDown",
+})
+
+
+@dataclass(slots=True, frozen=True)
+class WorkflowStep:
+    """One thing the operator did, in the order it happened.
+
+    Deliberately NOT reconstructed by the generator. Order lives in `seq`,
+    which the derived model does not otherwise carry, and reconstructing it
+    from `AnalysisResult`'s frequency-sorted lists produced a script that
+    replayed the session in observation-count order.
+
+    `value_recorded` says a value was typed. It never says WHICH: the capture
+    records that an input event happened on an element, not its content, and
+    a generated `.fill("Alice")` would be an invention. It is always False on a
+    `press` step -- a keystroke is not a missing value.
+
+    `key` is set only when the capture recorded one AND it is in `SAFE_KEYS`.
+    An unrecorded or non-allowlisted key stays None and the generator emits a
+    TODO rather than substituting one: the session did not observe an Enter
+    press, and writing one would put behaviour in the script that never
+    happened.
+    """
+
+    ordinal: int
+    seq: int
+    kind: str
+    element_key: str | None = None
+    url_pattern: str | None = None
+    repeat_count: int = 1
+    value_recorded: bool = False
+    key: str | None = None
     evidence: Evidence = field(default_factory=Evidence)
 
 
@@ -282,6 +342,9 @@ class AnalysisResult:
     ui_elements: list[UIElement] = field(default_factory=list)
     states: list[AppState] = field(default_factory=list)
     transitions: list[StateTransition] = field(default_factory=list)
+    # The observed workflow, in `seq` order. Empty when no user action and no
+    # navigation was recorded.
+    workflow: list[WorkflowStep] = field(default_factory=list)
     technologies: list[Technology] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     # Forensic-era additions. Empty on a normal session, which is what keeps

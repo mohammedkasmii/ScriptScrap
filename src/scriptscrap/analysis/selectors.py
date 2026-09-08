@@ -47,7 +47,7 @@ def generated_id_warning(value: str | None) -> str | None:
     return None
 
 
-def _semantic_key(element: dict[str, Any]) -> str:
+def semantic_key(element: dict[str, Any]) -> str:
     """Group observations that are plausibly the same logical element.
 
     Built only from signals a re-render is unlikely to change. Notably it does
@@ -77,7 +77,7 @@ class SelectorAnalyzer:
             element = event.payload.get("element")
             if not isinstance(element, dict) or not element.get("tag"):
                 continue
-            groups[_semantic_key(element)].append(event)
+            groups[semantic_key(element)].append(event)
 
         results = [self._build(key, group) for key, group in groups.items()]
         results.sort(key=lambda e: (-e.observation_count, e.key))

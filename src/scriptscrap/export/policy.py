@@ -278,6 +278,9 @@ VOCABULARY: dict[tuple[str, str], frozenset[str] | re.Pattern[str]] = {
     ("Technology", "category"): _TECHNOLOGY_CATEGORIES,
     ("Finding", "kind"): _FINDING_KINDS,
     ("Finding", "severity"): frozenset({"info", "warning", "critical"}),
+    ("StateTransition", "trigger_type"): _EVENT_TYPES,
+    ("WorkflowStep", "kind"): frozenset(models.WORKFLOW_KINDS),
+    ("WorkflowStep", "key"): frozenset(models.SAFE_KEYS),
     # Plan C adds ("StateTransition", "trigger_type") and the two WorkflowStep
     # entries when it introduces those fields.
 }
@@ -478,6 +481,9 @@ POLICY: dict[tuple[str, str], Disposition] = {
     # so it carries page content. Plan C adds `trigger_type` -- the bare
     # EventType, with no element name attached -- as the exportable half.
     ("StateTransition", "trigger"): Disposition.DROP,
+    ("StateTransition", "trigger_type"): Disposition.REASON_CODE,
+    ("StateTransition", "trigger_element_key"): Disposition.DROP,
+    ("StateTransition", "trigger_event_id"): Disposition.EVIDENCE,
     ("StateTransition", "observation_count"): Disposition.COUNTS,
     ("StateTransition", "evidence"): Disposition.STRUCTURAL,
 
@@ -525,6 +531,22 @@ POLICY: dict[tuple[str, str], Disposition] = {
     ("AnalysisResult", "ui_elements"): Disposition.STRUCTURAL,
     ("AnalysisResult", "states"): Disposition.STRUCTURAL,
     ("AnalysisResult", "transitions"): Disposition.STRUCTURAL,
+    ("AnalysisResult", "workflow"): Disposition.STRUCTURAL,
+
+    # --- WorkflowStep ------------------------------------------------------
+    ("WorkflowStep", "ordinal"): Disposition.COUNTS,
+    ("WorkflowStep", "seq"): Disposition.COUNTS,
+    ("WorkflowStep", "kind"): Disposition.REASON_CODE,
+    ("WorkflowStep", "element_key"): Disposition.DROP,   # tag|role|label|text|...
+    ("WorkflowStep", "url_pattern"): Disposition.ROUTE,
+    ("WorkflowStep", "repeat_count"): Disposition.COUNTS,
+    ("WorkflowStep", "value_recorded"): Disposition.COUNTS,
+    # Constrained to SAFE_KEYS where it is set. REASON_CODE asserts that at the
+    # export boundary too, against the same frozenset -- one definition, and a
+    # value from anywhere else fails loudly rather than being trusted for
+    # looking like a key name.
+    ("WorkflowStep", "key"): Disposition.REASON_CODE,
+    ("WorkflowStep", "evidence"): Disposition.STRUCTURAL,
     ("AnalysisResult", "technologies"): Disposition.STRUCTURAL,
     ("AnalysisResult", "findings"): Disposition.STRUCTURAL,
     ("AnalysisResult", "activities"): Disposition.DROP,
@@ -545,7 +567,7 @@ _MODEL_CLASSES = (
     models.Schema, models.SchemaField, models.DependencyEdge,
     models.LocatorCandidate, models.UIElement, models.AppState,
     models.StateTransition, models.Technology, models.Finding,
-    models.Evidence, models.EventIndexRow,
+    models.Evidence, models.EventIndexRow, models.WorkflowStep,
 )
 
 

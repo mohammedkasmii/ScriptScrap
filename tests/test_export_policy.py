@@ -109,7 +109,13 @@ def _marked_result() -> models.AnalysisResult:
             observation_count=1, forms=[MARKER], evidence=evidence)],
         transitions=[models.StateTransition(
             from_state="a1b2c3d4e5f6", to_state="a1b2c3d4e5f6", trigger=MARKER,
+            trigger_type="user_click", trigger_element_key=MARKER,
+            trigger_event_id="evt-00000001",
             observation_count=1, evidence=evidence)],
+        workflow=[models.WorkflowStep(
+            ordinal=0, seq=1, kind="fill", element_key=MARKER,
+            url_pattern="/" + MARKER, repeat_count=1, value_recorded=True,
+            key="Enter", evidence=evidence)],
         technologies=[models.Technology(
             name="jQuery", category="library", confidence=1.0,
             signals=[MARKER], signal_count=1, evidence=evidence)],
@@ -348,6 +354,16 @@ REASON_CODE_SETTERS = {
         lambda r, v: setattr(r.technologies[0], "category", v),
     ("Finding", "kind"): lambda r, v: setattr(r.findings[0], "kind", v),
     ("Finding", "severity"): lambda r, v: setattr(r.findings[0], "severity", v),
+    ("StateTransition", "trigger_type"):
+        lambda r, v: setattr(r.transitions[0], "trigger_type", v),
+    # WorkflowStep is frozen=True, so the hostile value is built in rather
+    # than assigned.
+    ("WorkflowStep", "kind"):
+        lambda r, v: r.workflow.__setitem__(
+            0, dataclasses.replace(r.workflow[0], kind=v)),
+    ("WorkflowStep", "key"):
+        lambda r, v: r.workflow.__setitem__(
+            0, dataclasses.replace(r.workflow[0], key=v)),
 }
 
 
