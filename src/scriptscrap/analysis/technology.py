@@ -128,6 +128,13 @@ class TechnologyAnalyzer:
             tech.confidence = max(tech.confidence, 0.9)
             hits["jQuery"] = tech
 
+        # `signals` holds field and operation names read off the application,
+        # so a shareable export carries the count and not the list. Recorded
+        # here, where the list is finished, rather than at the export boundary
+        # where it would be a second thing to keep in step.
+        for tech in hits.values():
+            tech.signal_count = len(tech.signals)
+
         return sorted(hits.values(), key=lambda t: (-t.confidence, t.name))
 
     @staticmethod

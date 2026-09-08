@@ -1,11 +1,10 @@
 """Shareable export: derived knowledge, sanitised.
 
-What goes in the shared export is a whitelist, not a blacklist. Raw bodies,
-screenshots and authenticated HTML are excluded because they cannot be made safe
-by pattern matching -- their safety would depend on having anticipated every
-shape a secret can take. Derived knowledge is included because it is already an
-abstraction over those bodies: a schema says a field is a string of length 14,
-not what the string was.
+What goes in the shared export is decided field by field, deny by default, in
+`policy.py`. This module only SERIALISES a result that has already been through
+`sanitise()`. Nothing here redacts: if a value reaching this file is unsafe,
+the defect is a disposition in the policy table, and a second scrubber here
+would hide it.
 
 Documents and artifacts are metadata only. Screenshots are never included.
 """
@@ -17,18 +16,23 @@ from pathlib import Path
 from typing import Any
 
 from ..analysis.models import AnalysisResult
+from .policy import sanitise
 from .redact import Redactor
 
-# Signals that describe a value's shape rather than carry it are safe to keep;
-# anything holding an observed value goes through the redactor.
-_SAFE_SIGNAL_KEYS = frozenset({
-    "observations", "distinct_concrete_paths", "templated_from_sibling_paths",
-    "exact_value_match", "unique_value_match", "endpoints_touched",
-    "field_name_similarity", "ordering_method", "temporal_distance_ms",
-    "same_frame", "mechanism", "repeat_count", "strategies_measured",
-    "route_shape", "trigger_type", "attribution", "interpretation",
-    "state_fields", "operation_fields", "operations", "transport_paths",
-})
+NOTICE = (
+    "Derived knowledge only, sanitised field by field, deny by default. Route "
+    "shapes and authored names survive. Every code -- method, kind, strategy, "
+    "severity, sensor -- is checked against a closed vocabulary, and an "
+    "unknown value fails the export rather than being emitted. Element labels "
+    "and element text are NOT included in any form. Free text that is reported "
+    "at all is reduced to a COARSE SIZE BUCKET (0, 1-10, 11-50, 51-200, 200+) "
+    "plus a stable pseudonym, so repeated values stay correlatable; no exact "
+    "length or word count is published. A locator that carried application "
+    "text is replaced by a fixed marker rather than shaped, so it cannot be "
+    "mistaken for one that still works. Credentials are removed. Raw bodies, "
+    "screenshots, HTML snapshots, script inventories and the evidence index "
+    "are NOT included and remain in the local session directory."
+)
 
 
 class DatasetExporter:
@@ -38,23 +42,26 @@ class DatasetExporter:
         self.redactor = redactor or Redactor()
 
     def build(self, result: AnalysisResult) -> dict[str, Any]:
-        r = self.redactor
+        """Sanitise, then serialise. The two are separate on purpose."""
+        return self.build_from_sanitised(sanitise(result, self.redactor))
+
+    def build_from_sanitised(self, safe: AnalysisResult) -> dict[str, Any]:
+        """Serialise a result that has ALREADY been through `sanitise`.
+
+        Nothing here redacts. If a value in `safe` is unsafe, the defect is in
+        `export/policy.py`, and putting a second scrubber here would hide it.
+        """
         return {
-            "schema": "scriptscrap/shared-dataset/1",
-            "session_id": r.pseudonyms.fingerprint(result.session_id),
-            "analysis_version": result.analysis_version,
-            "event_count": result.event_count,
-            "notice": (
-                "Derived knowledge only. Credentials removed; identifiers and "
-                "emails replaced by stable pseudonyms so value propagation stays "
-                "analysable. Raw bodies, screenshots and HTML snapshots are NOT "
-                "included and remain in the local session directory."
-            ),
+            "schema": "scriptscrap/shared-dataset/2",
+            "session_id": safe.session_id,
+            "analysis_version": safe.analysis_version,
+            "event_count": safe.event_count,
+            "notice": NOTICE,
             "technologies": [
-                {"name": t.name, "category": t.category, "confidence": t.confidence,
-                 "signals": [r.scrub_text(s) for s in t.signals],
+                {"name": t.name, "category": t.category,
+                 "confidence": t.confidence, "signal_count": t.signal_count,
                  "evidence_ids": t.evidence.event_ids}
-                for t in result.technologies
+                for t in safe.technologies
             ],
             "endpoints": [
                 {
@@ -63,7 +70,7 @@ class DatasetExporter:
                     "observation_count": e.observation_count,
                     "confidence": e.confidence,
                     "statuses": e.statuses,
-                    "concrete_paths": [r.scrub_text(p) for p in e.concrete_paths],
+                    "concrete_paths": e.concrete_paths,
                     "graphql_operation": e.graphql_operation,
                     "graphql_operation_type": e.graphql_operation_type,
                     "params": [
@@ -71,16 +78,13 @@ class DatasetExporter:
                          "inferred_type": p.inferred_type,
                          "sample_count": p.sample_count,
                          "distinct_values": p.distinct_values,
-                         "examples": [r.scrub_example(v) for v in p.examples],
-                         "enum_candidate": (
-                             [r.scrub_example(v) for v in p.enum_candidate]
-                             if p.enum_candidate else None),
-                         }
+                         "examples": p.examples,
+                         "enum_candidate": p.enum_candidate}
                         for p in e.params
                     ],
                     "evidence_ids": e.evidence.event_ids,
                 }
-                for e in result.endpoints
+                for e in safe.endpoints
             ],
             "schemas": [
                 {
@@ -94,15 +98,13 @@ class DatasetExporter:
                          "observed_optional": f.observed_optional,
                          "null_count": f.null_count,
                          "inferred_format": f.inferred_format,
-                         "enum_candidate": (
-                             [r.scrub_example(v) for v in f.enum_candidate]
-                             if f.enum_candidate else None),
-                         "examples": [r.scrub_example(v) for v in f.examples]}
+                         "enum_candidate": f.enum_candidate,
+                         "examples": f.examples}
                         for f in s.fields
                     ],
                     "evidence_ids": s.evidence.event_ids,
                 }
-                for s in result.schemas
+                for s in safe.schemas
             ],
             "dependencies": [
                 {
@@ -111,110 +113,55 @@ class DatasetExporter:
                     "mechanism": d.mechanism, "confidence": d.confidence,
                     "repeat_count": d.repeat_count,
                     "value_uniqueness": d.value_uniqueness,
-                    "evidence": self._safe_signals(d.evidence.signals),
+                    "evidence": d.evidence.signals,
                     "evidence_ids": d.evidence.event_ids,
                 }
-                for d in result.dependencies
+                for d in safe.dependencies
             ],
             "ui_elements": [
                 {
                     "tag": u.tag, "role": u.role,
-                    "label": r.scrub_text(u.label) if u.label else None,
-                    "text": r.scrub_text(u.text) if u.text else None,
                     "form": u.form, "observation_count": u.observation_count,
                     "actions": u.actions,
                     "recommended": (
                         {"strategy": u.recommended.strategy,
-                         "value": r.scrub_text(u.recommended.value),
+                         "value": u.recommended.value,
                          "stability": round(u.recommended.stability, 3)}
                         if u.recommended else None),
                     "locators": [
-                        {"strategy": loc.strategy, "value": r.scrub_text(loc.value),
+                        {"strategy": loc.strategy, "value": loc.value,
                          "stability": round(loc.stability, 3),
                          "resolved": f"{loc.resolved_count}/{loc.sample_count}",
-                         "warning": loc.warning}
+                         "warning_code": loc.warning_code}
                         for loc in u.locators
                     ],
                     "evidence_ids": u.evidence.event_ids,
                 }
-                for u in result.ui_elements
+                for u in safe.ui_elements
             ],
             "states": [
                 {"fingerprint": s.fingerprint, "label": s.label,
                  "url_pattern": s.url_pattern,
                  "observation_count": s.observation_count, "forms": s.forms,
                  "evidence_ids": s.evidence.event_ids}
-                for s in result.states
+                for s in safe.states
             ],
             "transitions": [
-                {"from": t.from_state, "to": t.to_state, "trigger": t.trigger,
+                {"from": t.from_state, "to": t.to_state,
                  "observation_count": t.observation_count,
-                 "evidence": self._safe_signals(t.evidence.signals),
+                 "evidence": t.evidence.signals,
                  "evidence_ids": t.evidence.event_ids}
-                for t in result.transitions
+                for t in safe.transitions
             ],
             "findings": [
-                {"kind": f.kind, "severity": f.severity,
-                 "message": r.scrub_text(f.message), "count": f.count,
+                {"kind": f.kind, "severity": f.severity, "count": f.count,
                  "evidence_ids": f.evidence.event_ids}
-                for f in result.findings
+                for f in safe.findings
             ],
-            # --- forensic evidence, sanitised ---------------------------
-            # Script SOURCE is never exported. A target application's code is
-            # its own; the hash lets a holder of the raw session prove which
-            # file this describes, and the inventory says what is in it without
-            # reproducing it.
-            "scripts": [
-                {
-                    "url": r.scrub_text(s.get("url") or ""),
-                    "sha256": s.get("sha256"),
-                    "size": s.get("size"),
-                    "media_type": s.get("media_type"),
-                    "source_map": s.get("source_map"),
-                    "declared_functions": (s.get("inventory") or {}).get(
-                        "declared_functions", []),
-                    "network_apis": (s.get("inventory") or {}).get("network_apis", []),
-                    "url_literals": [
-                        r.scrub_text(u)
-                        for u in (s.get("inventory") or {}).get("url_literals", [])
-                    ],
-                    "evidence_ids": s.get("evidence_ids", []),
-                    "note": "source text is NOT exported; it remains in the local blob store",
-                }
-                for s in result.scripts
-            ],
-            "capture_health": result.health,
-            "reconciliation": self._reconciliation(result),
-            "redaction": self.redactor.stats(),
+            "capture_health": safe.health,
+            "auth_header_names": sorted(safe.auth_headers),
+            "redaction": {**self.redactor.stats(), "policy_version": "2"},
         }
-
-    @staticmethod
-    def _reconciliation(result: AnalysisResult) -> dict[str, Any]:
-        """Multi-sensor agreement, as counts and relationships only."""
-        from ..analysis.reconcile import summarise
-
-        summary = summarise(result.activities) if result.activities else {}
-        conflicts = [
-            {
-                "activity": a.key,
-                "relation": a.relation,
-                "sensors": sorted(a.sensors),
-                "conflicts": a.conflicts,
-                "evidence_ids": a.evidence.event_ids,
-            }
-            for a in result.activities if a.conflicts
-        ]
-        return {"summary": summary, "conflicts": conflicts}
-
-    def _safe_signals(self, signals: dict[str, Any]) -> dict[str, Any]:
-        """Keep shape-describing signals; redact anything carrying a value."""
-        out: dict[str, Any] = {}
-        for key, value in signals.items():
-            if key in _SAFE_SIGNAL_KEYS:
-                out[key] = value
-            else:
-                out[key] = self.redactor.scrub(value, name=key)
-        return out
 
     def write(self, result: AnalysisResult, directory: str | Path) -> Path:
         target = Path(directory)

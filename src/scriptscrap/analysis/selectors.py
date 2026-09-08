@@ -120,11 +120,17 @@ class SelectorAnalyzer:
             # The best single value for this strategy, and how often it held.
             value, count = max(values.items(), key=lambda kv: kv[1])
             warning = generated_id_warning(value) if strategy in ("id", "css", "structural") else None
+            # The prose warning interpolates a framework name or a count, so it
+            # cannot be exported. The code beside it is a fixed constant and is
+            # what a shareable dataset carries instead.
+            warning_code = "framework_generated" if warning else None
             if len(values) > 1 and warning is None:
                 warning = f"value changed across observations ({len(values)} distinct)"
+                warning_code = "value_varied"
             locators.append(LocatorCandidate(
                 strategy=strategy, value=value,
                 resolved_count=count, sample_count=total, warning=warning,
+                warning_code=warning_code,
             ))
         locators.sort(key=lambda locator: (-locator.stability, locator.strategy))
 

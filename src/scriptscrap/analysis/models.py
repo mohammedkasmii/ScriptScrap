@@ -160,6 +160,10 @@ class LocatorCandidate:
     resolved_count: int
     sample_count: int
     warning: str | None = None
+    # The fixed constant behind `warning`. `warning` interpolates a framework
+    # name or a count ("value changed across observations (3 distinct)") and is
+    # therefore not exportable; this is.
+    warning_code: str | None = None      # "framework_generated" | "value_varied"
 
     @property
     def stability(self) -> float:
@@ -225,6 +229,11 @@ class Technology:
     category: str
     confidence: float
     signals: list[str] = field(default_factory=list)
+    # How many signals, not which. `signals` is built from
+    # `sorted(webforms_state | webforms_ops)` and `sorted(graphql_ops)` --
+    # field and operation names read off the application -- so the list itself
+    # cannot leave the machine, and the count is what survives export.
+    signal_count: int = 0
     evidence: Evidence = field(default_factory=Evidence)
 
 

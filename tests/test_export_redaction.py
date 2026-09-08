@@ -107,7 +107,61 @@ def test_pseudonymizer_is_stable_within_a_session():
     assert p.pseudonym("B", "ID") != p.pseudonym("A", "ID")
 
 
+# The regions of the dataset whose contract is that NO captured value appears
+# in them, in any form. These are the 28 fields the audit found leaking.
+#
+# `endpoints`, `schemas` and `ui_elements[].locators` are deliberately not
+# here: ROUTE keeps route words, NAME keeps field paths and parameter names,
+# and LOCATOR keeps a structural `#id` selector. Each is a documented,
+# load-bearing trade pinned by tests/test_export_policy.py --
+# `test_the_documented_limits_of_route_and_name` and
+# `test_a_route_word_is_kept_and_that_is_the_documented_trade`.
+NEVER_VERBATIM_REGIONS = (
+    "ui_elements", "findings", "capture_health", "transitions",
+    "technologies", "dependencies", "states",
+)
+
+
+def _never_verbatim_blob(payload: dict) -> str:
+    """The parts of the export that promise to carry no captured value.
+
+    `ui_elements` is included but its `locators` are stripped first, so the
+    documented locator trade does not mask the fields around it.
+    """
+    import copy
+
+    regions = {}
+    for name in NEVER_VERBATIM_REGIONS:
+        region = copy.deepcopy(payload.get(name))
+        if name == "ui_elements":
+            for element in region or []:
+                element.pop("locators", None)
+                element.pop("recommended", None)
+        regions[name] = region
+    return json.dumps(regions, ensure_ascii=False)
+
+
+def _collect_strings(value, into: set[str]) -> None:
+    if isinstance(value, str):
+        into.add(value)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            into.add(str(key))
+            _collect_strings(item, into)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_strings(item, into)
+
+
 def test_shared_dataset_leaks_no_fixture_secret(tmp_path):
+    """Not four planted strings: every interesting string the fixture log holds.
+
+    The old version checked FIXTURE_SECRETS and passed while the export carried
+    element text verbatim -- because the fixture never puts a secret in element
+    text and the real capture did.
+    """
+    from scriptscrap.events import EventLogReader
+
     result = analyze_log(SAMPLE_EVENT_LOG)
     exporter = DatasetExporter()
     path = exporter.write(result, tmp_path / "shared")
@@ -117,9 +171,23 @@ def test_shared_dataset_leaks_no_fixture_secret(tmp_path):
         assert secret not in blob, f"{secret} leaked into the shareable export"
     assert "Bearer " not in blob
     assert "eyJ" not in blob
-    # Operator-typed personal data is neither credential- nor identifier-shaped,
-    # so it needs its own rule; an earlier version of the exporter leaked it.
     assert "Alice Benali" not in blob, "operator-typed PII leaked into the export"
+
+    captured: set[str] = set()
+    for event in EventLogReader(SAMPLE_EVENT_LOG):
+        _collect_strings(event.payload, captured)
+
+    # A captured string long enough to be a value, and carrying a space or a
+    # digit so it is not a bare vocabulary word.
+    interesting = {
+        s for s in captured
+        if len(s) >= 8 and any(ch.isspace() or ch.isdigit() for ch in s)
+    }
+    region = _never_verbatim_blob(exporter.build(result))
+    survivors = sorted(s for s in interesting if s in region)
+    assert survivors == [], (
+        f"{len(survivors)} captured string(s) reached a never-verbatim region: "
+        f"{survivors[:5]}")
 
 
 def test_shared_dataset_excludes_raw_artifacts(tmp_path):

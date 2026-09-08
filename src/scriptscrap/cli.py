@@ -65,24 +65,38 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
+    from .export import Redactor, sanitise
+
     session = Path(args.session)
     log = _resolve_log(session)
     root = log.parent
 
     result = analyze_log(log)
-    exporter = DatasetExporter()
-    target = root / "export" / "shared"
-    dataset_path = exporter.write(result, target)
-    (target / "report.md").write_text(render(result), encoding="utf-8")
+    redactor = Redactor()
+    # ONE sanitisation boundary. Every artifact below is a view of `safe`; a
+    # second one would be a second thing to get wrong. The previous version
+    # rendered report.md straight from the unredacted result.
+    safe = sanitise(result, redactor)
 
-    stats = exporter.redactor.stats()
+    exporter = DatasetExporter(redactor=redactor)
+    target = root / "export" / "shared"
+    target.mkdir(parents=True, exist_ok=True)
+    dataset_path = target / "dataset.json"
+    dataset_path.write_text(
+        json.dumps(exporter.build_from_sanitised(safe), indent=2,
+                   ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8")
+    (target / "report.md").write_text(render(safe), encoding="utf-8")
+
+    stats = redactor.stats()
     print(f"shareable dataset  {dataset_path}")
     print(f"report             {target / 'report.md'}")
     print(f"credentials removed  {stats['credentials_removed']}")
     print(f"values pseudonymised {stats['values_pseudonymised']} "
           f"({stats['distinct_pseudonyms']} distinct)")
-    print("\nRaw bodies, screenshots and HTML snapshots are NOT exported; they "
-          "remain in the local session directory.")
+    print("\nEvery value was classified before export. Element labels and text "
+          "are not exported at all; raw bodies, screenshots, HTML snapshots "
+          "and the evidence index remain in the local session directory.")
     return 0
 
 

@@ -23,9 +23,26 @@ def _table(headers: list[str], rows: list[list[Any]]) -> list[str]:
            "|" + "|".join("---" for _ in headers) + "|"]
     out.extend("| " + " | ".join(str(c) for c in row) + " |" for row in rows[:MAX_ROWS])
     if len(rows) > MAX_ROWS:
-        out.append(f"| _… {len(rows) - MAX_ROWS} more_ |" + " |" * (len(headers) - 1))
+        # Say it plainly. A truncated table read as a complete one is how the
+        # audit's run3 export looked safe: the two elements carrying a password
+        # and a table of names sat at rows 41 and 80.
+        out.append(f"| _{len(rows) - MAX_ROWS} more rows not shown_ |"
+                   + " |" * (len(headers) - 1))
     out.append("")
     return out
+
+
+def _why(sensor: dict[str, Any]) -> str:
+    """Why a sensor is in the state it is, from whichever form is present.
+
+    A local report has the prose. A sanitised one has only how many reasons
+    there were, because each is a derived string rather than a fixed constant.
+    """
+    reasons = sensor.get("reasons")
+    if reasons:
+        return "; ".join(reasons)
+    count = sensor.get("reasons_count")
+    return f"{count} reason(s), text not exported" if count else "-"
 
 
 def render(result: AnalysisResult) -> str:
@@ -172,19 +189,28 @@ def render(result: AnalysisResult) -> str:
     # -- capture health ----------------------------------------------------
     if result.health:
         health = result.health
+        # A sanitised result carries `overall_code` and per-sensor counts
+        # instead of the prose `overall` and `reasons`, because those are
+        # derived strings rather than fixed constants. This renders either,
+        # so one function serves both the local report and the shared one.
+        overall = health.get("overall") or health.get("overall_code", "unknown")
         lines += ["## Capture health", "",
-                  f"**{health['overall']}**", "",
+                  f"**{overall}**", "",
                   "Whether the application did nothing, or ScriptScrap failed to "
                   "see it. Statuses are categories; a percentage appears only "
                   "where a real denominator exists.", ""]
         lines += _table(
             ["Sensor", "Status", "Why"],
-            [[s_["sensor"], s_["status"], "; ".join(s_["reasons"]) or "-"]
-             for s_ in health["sensors"]],
+            [[s_.get("sensor", "-"), s_.get("status", "-"), _why(s_)]
+             for s_ in health.get("sensors", [])],
         )
         if health.get("notes"):
             lines += ["### Notes", ""]
             lines += [f"- {n}" for n in health["notes"]] + [""]
+        elif health.get("notes_count"):
+            lines += ["### Notes", "",
+                      f"_{health['notes_count']} note(s); the text is not in a "
+                      "sanitised export._", ""]
 
     # -- forensic scripts --------------------------------------------------
     if result.scripts:
