@@ -33,6 +33,28 @@ def _fixture_event_count() -> int:
     return sum(1 for line in SAMPLE.read_text(encoding="utf-8").splitlines()
                if line.strip())
 
+def _fixture_count(*, type: str | None = None, source: str | None = None) -> int:
+    """How many fixture events match a type or a source.
+
+    Derived, not hard-coded, for the same reason `_fixture_event_count` is: the
+    fixture is regenerated whenever a sensor change is re-blessed, and a live
+    browser run varies by a mutation or two. What these tests assert is that a
+    filter agrees with the log, not that the log has a particular size.
+    """
+    import json as _json
+
+    total = 0
+    for line in SAMPLE.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = _json.loads(line)
+        if type is not None and event["type"] != type:
+            continue
+        if source is not None and event["source"] != source:
+            continue
+        total += 1
+    return total
+
 
 
 @pytest.fixture(scope="module")
@@ -82,7 +104,7 @@ def test_timeline_filters_by_type(workspace):
     body = api.timeline(workspace, q(types="http_request", limit=100))
     assert body["rows"]
     assert {r["type"] for r in body["rows"]} == {"http_request"}
-    assert body["total"] == 19
+    assert body["total"] == _fixture_count(type="http_request")
 
 
 def test_timeline_filters_by_several_types(workspace):
@@ -94,7 +116,7 @@ def test_timeline_filters_by_several_types(workspace):
 def test_timeline_filters_by_source(workspace):
     body = api.timeline(workspace, q(sources="runtime", limit=200))
     assert {r["source"] for r in body["rows"]} == {"runtime"}
-    assert body["total"] == 64
+    assert body["total"] == _fixture_count(source="runtime")
 
 
 def test_timeline_intersects_type_and_source(workspace):
@@ -108,8 +130,8 @@ def test_timeline_offers_the_filter_facets(workspace):
     """The chips are built from what the session actually contains, so a
     filter can never be offered for something that is not there."""
     body = api.timeline(workspace, q(limit=1))
-    assert body["facets"]["types"]["user_click"] == 22
-    assert body["facets"]["sources"]["runtime"] == 64
+    assert body["facets"]["types"]["user_click"] == _fixture_count(type="user_click")
+    assert body["facets"]["sources"]["runtime"] == _fixture_count(source="runtime")
 
 
 def test_a_cursor_past_the_end_is_empty_not_an_error(workspace):

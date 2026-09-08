@@ -295,3 +295,28 @@ def test_the_evidence_index_covers_the_whole_log(investigation_output: Path):
     for row in result.event_index:
         line = raw[row.byte_offset:row.byte_offset + row.byte_length]
         assert _json.loads(line)["event_id"] == row.event_id
+
+
+@pytest.mark.browser
+def test_the_investigator_retains_no_unwritten_network_log(investigation_output):
+    """`self.network_log` accumulated every request's headers and body in
+    memory for the whole session and was written nowhere after the legacy
+    outputs were retired -- re-creating the memory profile the event log was
+    introduced to eliminate."""
+    from scriptscrap.testing.capture import load_investigator
+
+    module = load_investigator(investigation_output)
+    scope = module.InvestigationScope("http://127.0.0.1:1")
+    engine = module.WebHarvester("http://127.0.0.1:1", scope, session_id="s")
+    dead = [name for name in
+            ("network_log", "dom_snapshots", "value_dependencies",
+             "openapi_paths", "out_of_scope", "value_origins")
+            if hasattr(engine, name)]
+    assert dead == [], f"unwritten in-memory buffers still exist: {dead}"
+
+
+@pytest.mark.browser
+def test_the_manifest_still_counts_out_of_scope_endpoints(investigation_snapshot):
+    counters = investigation_snapshot["session_manifest.json"]["counters"]
+    assert "out_of_scope_endpoints" in counters
+    assert isinstance(counters["out_of_scope_endpoints"], int)

@@ -162,7 +162,6 @@
       "methods_excluded": [
         "OPTIONS"
       ],
-      "openapi_credential_values_removed": 2,
       "out_of_scope_frame_hosts": {},
       "out_of_scope_frame_scans": 0,
       "request_routing_active": false,
@@ -187,8 +186,6 @@
       ]
     },
     "counters": {
-      "dependency_edges": 2,
-      "dom_snapshots": 4,
       "endpoints_in_scope": 16,
       "network_events_logged": 19,
       "out_of_scope_endpoints": 0,

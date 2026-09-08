@@ -35,6 +35,28 @@ def _fixture_event_count() -> int:
     return sum(1 for line in SAMPLE.read_text(encoding="utf-8").splitlines()
                if line.strip())
 
+def _fixture_count(*, type: str | None = None, source: str | None = None) -> int:
+    """How many fixture events match a type or a source.
+
+    Derived, not hard-coded, for the same reason `_fixture_event_count` is: the
+    fixture is regenerated whenever a sensor change is re-blessed, and a live
+    browser run varies by a mutation or two. What these tests assert is that a
+    filter agrees with the log, not that the log has a particular size.
+    """
+    import json as _json
+
+    total = 0
+    for line in SAMPLE.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = _json.loads(line)
+        if type is not None and event["type"] != type:
+            continue
+        if source is not None and event["source"] != source:
+            continue
+        total += 1
+    return total
+
 
 
 @pytest.fixture
@@ -97,13 +119,13 @@ def test_page_filters_by_type(store):
     page = store.page(types=["http_request"], limit=100)
     assert page.events
     assert {str(e.type) for e in page.events} == {"http_request"}
-    assert page.total == 19
+    assert page.total == _fixture_count(type="http_request")
 
 
 def test_page_filters_by_source(store):
     page = store.page(sources=["runtime"], limit=200)
     assert {str(e.source) for e in page.events} == {"runtime"}
-    assert page.total == 64
+    assert page.total == _fixture_count(source="runtime")
 
 
 def test_page_intersects_type_and_source(store):
@@ -138,8 +160,8 @@ def test_an_unmatched_filter_returns_an_empty_page(store):
 
 def test_counts_by_type_matches_the_log(store):
     counts = store.counts_by_type()
-    assert counts["user_click"] == 22
-    assert counts["http_request"] == 19
+    assert counts["user_click"] == _fixture_count(type="user_click")
+    assert counts["http_request"] == _fixture_count(type="http_request")
     assert sum(counts.values()) == _fixture_event_count()
 
 
@@ -202,8 +224,8 @@ def test_metadata_reads_do_not_require_the_log(session):
     store = EventStore(db, log)
     try:
         log.unlink()
-        assert store.counts_by_type()["user_click"] == 22
-        assert store.counts_by_source()["runtime"] == 64
+        assert store.counts_by_type()["user_click"] == _fixture_count(type="user_click")
+        assert store.counts_by_source()["runtime"] == _fixture_count(source="runtime")
         assert len(store.page_index(limit=3).rows) == 3
         assert store.seq_range() is not None
     finally:

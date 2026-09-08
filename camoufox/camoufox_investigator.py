@@ -3,7 +3,6 @@ import contextlib
 import hashlib
 import json
 import platform
-import re
 import sys
 from collections import Counter
 from datetime import UTC, datetime
@@ -11,7 +10,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote_plus, urlparse
+from urllib.parse import urlparse
 
 from camoufox.addons import DefaultAddons
 from camoufox.async_api import AsyncCamoufox
@@ -445,15 +444,15 @@ class WebHarvester:
         self.target_url = target_url
         self.scope = scope
         self.endpoints = {}
-        self.network_log = []
-        self.dom_snapshots = []
         self._last_form_inventory = None
-        self.value_origins = {}
-        self.value_dependencies = []
-        self.openapi_paths = {}
+        # A COUNT, not a log. `self.network_log` held every request's headers
+        # and body in RAM for the whole session and was written nowhere; the
+        # events are the record, and the manifest needs only how many.
+        self._http_requests = 0
 
-        # Metadata-only record of everything outside the engagement boundary.
-        self.out_of_scope = {}
+        # Metadata-only record of everything outside the engagement boundary:
+        # which endpoints, never what was in them.
+        self.out_of_scope_endpoints: set[str] = set()
         self.skipped_visual_captures = 0
 
         # Third-party frames are skipped on every scan. Counting them here and
@@ -465,7 +464,6 @@ class WebHarvester:
         # Credential values stripped from the generated OpenAPI examples. A
         # spec is a shareable artifact; reporting this number makes the claim
         # checkable instead of implied.
-        self.openapi_credentials_removed = 0
 
         # Snapshot fidelity accounting: a partial offline snapshot must be
         # visible as partial, not silently pass for complete.
@@ -548,8 +546,8 @@ class WebHarvester:
             EV.EventType.SESSION_END,
             counters={
                 "endpoints_in_scope": len(self.endpoints),
-                "network_events": len(self.network_log),
-                "out_of_scope_endpoints": len(self.out_of_scope),
+                "network_events": self._http_requests,
+                "out_of_scope_endpoints": len(self.out_of_scope_endpoints),
             },
         )
         self.event_log.close()
@@ -571,18 +569,7 @@ class WebHarvester:
         """
         parsed = urlparse(url)
         key = f"{method} {parsed.hostname or '?'}{parsed.path or '/'}"
-        entry = self.out_of_scope.setdefault(key, {
-            "method": method,
-            "host": parsed.hostname,
-            "path": parsed.path or "/",
-            "count": 0,
-            "statuses": set(),
-            "first_seen": datetime.now(UTC).isoformat(),
-        })
-        if status is None:
-            entry["count"] += 1
-        else:
-            entry["statuses"].add(status)
+        self.out_of_scope_endpoints.add(key)
 
     async def route_filter(self, route):
         """Media-blocking route handler. NOT installed by default any more.
@@ -728,20 +715,9 @@ class WebHarvester:
             elif post_data and not parsed_json and len(self.endpoints[key]["sample_payloads"]) < 2:
                 self.endpoints[key]["sample_payloads"].append(post_data) # Capture raw forms/multipart
 
-            self.network_log.append({
-                "time": datetime.now().isoformat(), 
-                "method": method,
-                "url": url, 
-                "headers": headers,
-                "body": parsed_json or post_data
-            })
+            self._http_requests += 1
             
             print(f"[API ->] {method:6} {url_path}")
-
-            if isinstance(parsed_json, (dict, list)):
-                self._correlate_dependencies(parsed_json, method, url_path)
-
-            self._build_openapi_request(method, url_path, parsed_json or post_data)
 
             # GraphQL collapses an entire API onto one URL, so the operation --
             # not the path -- is the endpoint identity worth recording.
@@ -806,7 +782,6 @@ class WebHarvester:
                     data = json.loads(resp_text)
                     body_kind = "json"
                     body_for_openapi = data
-                    self._map_response_tokens(data, req.method.upper(), url_path)
 
                     if len(self.endpoints.get(key, {}).get("response_samples", [])) < 2:
                         self.endpoints[key]["response_samples"].append(data)
@@ -816,8 +791,6 @@ class WebHarvester:
                     if len(self.endpoints.get(key, {}).get("response_samples", [])) < 1:
                         self.endpoints[key]["response_samples"].append(resp_text[:500] + "...")
 
-                self._build_openapi_response(
-                    req.method.upper(), url_path, response.status, body_for_openapi)
             except Exception as exc:
                 # Playwright throws for redirects, evicted bodies, and bodies read
                 # after navigation. That is a hole in the evidence, not a non-event.
@@ -876,132 +849,6 @@ class WebHarvester:
     # ==========================================
     # DATA CORRELATION & OPENAPI
     # ==========================================
-    def _map_response_tokens(self, data, method, path, prefix=""):
-        if isinstance(data, dict):
-            for k, v in data.items(): 
-                self._map_response_tokens(v, method, path, f"{prefix}.{k}" if prefix else str(k))
-        elif isinstance(data, list):
-            for i, v in enumerate(data[:10]): 
-                self._map_response_tokens(v, method, path, f"{prefix}[{i}]")
-        elif isinstance(data, (str, int)) and not isinstance(data, bool):
-            val = str(data)
-            if 3 <= len(val) <= 120:
-                # Index key for value-propagation lookup, not a security primitive.
-                h = hashlib.sha1(  # noqa: S324
-                    val.encode("utf-8", errors="ignore"), usedforsecurity=False
-                ).hexdigest()
-                self.value_origins[h] = {"origin_endpoint": f"{method} {path}", "field": prefix}
-
-    def _correlate_dependencies(self, data, method, path, prefix=""):
-        if isinstance(data, dict):
-            for k, v in data.items(): 
-                self._correlate_dependencies(v, method, path, f"{prefix}.{k}" if prefix else str(k))
-        elif isinstance(data, list):
-            for i, v in enumerate(data[:10]): 
-                self._correlate_dependencies(v, method, path, f"{prefix}[{i}]")
-        elif isinstance(data, (str, int)) and not isinstance(data, bool):
-            # Must match the digest used by _map_response_tokens.
-            h = hashlib.sha1(  # noqa: S324
-                str(data).encode("utf-8", errors="ignore"), usedforsecurity=False
-            ).hexdigest()
-            origin = self.value_origins.get(h)
-            if origin:
-                link = {"source": origin, "consumer": {"endpoint": f"{method} {path}", "field": prefix}}
-                if link not in self.value_dependencies:
-                    self.value_dependencies.append(link)
-
-    def _build_openapi_request(self, method, path, payload):
-        if path not in self.openapi_paths:
-            self.openapi_paths[path] = {}
-        
-        m_lower = method.lower()
-        if m_lower not in self.openapi_paths[path]:
-            self.openapi_paths[path][m_lower] = {
-                "summary": f"Auto-captured {path}",
-                "responses": {}
-            }
-            
-        if payload:
-            content_type = "application/json" if isinstance(payload, (dict, list)) else "application/x-www-form-urlencoded"
-            self.openapi_paths[path][m_lower]["requestBody"] = {
-                "content": {
-                    content_type: {
-                        "schema": {"type": "object"},
-                        # A spec is the artifact people hand to a developer.
-                        # The first real capture put the operator's live login
-                        # password into the /authenticate example verbatim,
-                        # because request bodies were copied here without
-                        # passing through the redaction that already protects
-                        # the shared dataset and the generated client.
-                        "example": self._redact_example(payload)
-                    }
-                }
-            }
-
-    def _redact_example(self, payload):
-        """Strip credential-named fields out of an OpenAPI example.
-
-        The SHAPE is what makes a spec useful -- which fields exist, what type
-        they are -- and that survives. Only the values of credential-named
-        fields are replaced, so the example still shows a developer exactly
-        what to send.
-        """
-        try:
-            from scriptscrap.export.redact import describe_credential, is_credential_name
-        except ImportError:  # pragma: no cover - bare venv without the package
-            return payload
-
-        def scrub(value, depth=0):
-            if depth > 8:
-                return value
-            if isinstance(value, dict):
-                out = {}
-                for key, item in value.items():
-                    if is_credential_name(key):
-                        self.openapi_credentials_removed += 1
-                        out[key] = describe_credential(item)
-                    else:
-                        out[key] = scrub(item, depth + 1)
-                return out
-            if isinstance(value, list):
-                return [scrub(v, depth + 1) for v in value[:20]]
-            return value
-
-        if isinstance(payload, str):
-            # A form body: `username=x&password=y`. Only the credential VALUES
-            # are substituted, in place -- parsing and re-joining the whole
-            # string would decode `%20` back to a space and hand the reader an
-            # example that is no longer a valid urlencoded body.
-            if "=" in payload and "\n" not in payload[:200]:
-                def replace(match):
-                    key, value = match.group(1), match.group(2)
-                    if is_credential_name(unquote_plus(key)):
-                        self.openapi_credentials_removed += 1
-                        return f"{key}={describe_credential(unquote_plus(value))}"
-                    return match.group(0)
-
-                return re.sub(r"([^=&]+)=([^&]*)", replace, payload)
-            return payload
-        return scrub(payload)
-
-    def _build_openapi_response(self, method, path, status, payload):
-        m_lower = method.lower()
-        if path in self.openapi_paths and m_lower in self.openapi_paths[path]:
-            content_type = "application/json" if isinstance(payload, (dict, list)) else "text/html"
-            self.openapi_paths[path][m_lower]["responses"][str(status)] = {
-                "description": "Auto-captured response",
-                "content": {
-                    content_type: {
-                        # Responses carry credentials too: a login endpoint
-                        # answers with the token it just minted.
-                        "example": self._redact_example(payload)
-                    }
-                }
-            }
-
-    # ==========================================
-    # FINAL EXPORT ENGINES
-    # ==========================================
     async def scan_all_frames(self, page):
         if not self.scope.contains(page.url):
             return
@@ -1038,7 +885,6 @@ class WebHarvester:
                 note="third-party frames are not read; scope is enforced per frame",
             )
 
-        self.dom_snapshots.append({"time": datetime.now().isoformat(), "frames": results})
         self.emit_event(
             EV.Source.ENGINE,
             EV.EventType.DOM_SNAPSHOT,
@@ -1277,7 +1123,6 @@ class WebHarvester:
                 "response_samples_per_endpoint": 2,
                 "request_samples_per_endpoint": 2,
                 "listeners_attached_at": "browser_context",
-                "openapi_credential_values_removed": self.openapi_credentials_removed,
                 "out_of_scope_frame_scans": self._out_of_scope_frame_scans,
                 "out_of_scope_frame_hosts": dict(
                     sorted(self._out_of_scope_frame_hosts.items())),
@@ -1324,12 +1169,10 @@ class WebHarvester:
             ],
             "counters": {
                 "endpoints_in_scope": len(self.endpoints),
-                "network_events_logged": len(self.network_log),
-                "dom_snapshots": len(self.dom_snapshots),
+                "network_events_logged": self._http_requests,
                 "visual_traces": self.step_counter - 1,
-                "out_of_scope_endpoints": len(self.out_of_scope),
+                "out_of_scope_endpoints": len(self.out_of_scope_endpoints),
                 "visual_captures_skipped_out_of_scope": self.skipped_visual_captures,
-                "dependency_edges": len(self.value_dependencies),
             },
             "event_spine": {
                 "mode": "authoritative",
@@ -1395,7 +1238,7 @@ class WebHarvester:
         written = sorted(p.name for p in OUTPUT_DIR.glob("*.*"))
         print(f"\n🏆 Exported {len(written)} files + visual traces to ./{OUTPUT_DIR.name}/")
         print(f"   In-scope endpoints: {len(self.endpoints)} | "
-              f"out-of-scope (metadata only): {len(self.out_of_scope)}")
+              f"out-of-scope (metadata only): {len(self.out_of_scope_endpoints)}")
         print("   ⚠  This directory contains unredacted authenticated capture. "
               "It is gitignored. Do not share it.")
 

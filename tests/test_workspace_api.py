@@ -35,6 +35,28 @@ def _fixture_event_count() -> int:
     return sum(1 for line in SAMPLE.read_text(encoding="utf-8").splitlines()
                if line.strip())
 
+def _fixture_count(*, type: str | None = None, source: str | None = None) -> int:
+    """How many fixture events match a type or a source.
+
+    Derived, not hard-coded, for the same reason `_fixture_event_count` is: the
+    fixture is regenerated whenever a sensor change is re-blessed, and a live
+    browser run varies by a mutation or two. What these tests assert is that a
+    filter agrees with the log, not that the log has a particular size.
+    """
+    import json as _json
+
+    total = 0
+    for line in SAMPLE.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = _json.loads(line)
+        if type is not None and event["type"] != type:
+            continue
+        if source is not None and event["source"] != source:
+            continue
+        total += 1
+    return total
+
 
 
 @pytest.fixture(scope="module")
@@ -94,8 +116,8 @@ def test_overview_counts_match_the_analysis(workspace):
 
 def test_overview_reports_event_type_counts(workspace):
     body = api.session_overview(workspace, {})
-    assert body["events_by_type"]["user_click"] == 22
-    assert body["events_by_source"]["runtime"] == 64
+    assert body["events_by_type"]["user_click"] == _fixture_count(type="user_click")
+    assert body["events_by_source"]["runtime"] == _fixture_count(source="runtime")
 
 
 def test_overview_orders_findings_by_severity(workspace):
