@@ -12,6 +12,7 @@ is expensive to discover.
 """
 
 from .client import render_client
+from .emit import GeneratedSourceError
 from .playwright import render_playwright
 
-__all__ = ["render_client", "render_playwright"]
+__all__ = ["GeneratedSourceError", "render_client", "render_playwright"]
