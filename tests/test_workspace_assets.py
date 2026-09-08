@@ -187,8 +187,12 @@ def test_every_asset_is_text_to_git(tmp_path):
     empty = tmp_path / "empty"
     empty.write_bytes(b"")
     for path in _sources():
-        result = subprocess.run(
-            ["git", "diff", "--numstat", "--no-index", "--", str(empty), str(path)],
-            capture_output=True, text=True, check=False)
+        # `git` from PATH: this is a test asking the repository's own tool how
+        # it classifies a file, and pinning an absolute path would make the
+        # test machine-specific for no gain.
+        command = ["git", "diff", "--numstat", "--no-index",   # noqa: S607
+                   "--", str(empty), str(path)]
+        result = subprocess.run(command, capture_output=True,  # noqa: S603
+                                text=True, check=False)
         assert not result.stdout.startswith("-\t-\t"), (
             f"{path.name} is binary to git: {result.stdout.strip()}")
