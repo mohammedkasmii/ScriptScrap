@@ -152,3 +152,30 @@ def test_the_redaction_badge_reads_unredacted_for_a_raw_session(session_root):
                 assert "badge-danger" in classes
 
     asyncio.run(run())
+
+
+def test_the_badge_reads_sanitised_over_an_export(tmp_path):
+    from scriptscrap.cli import build_parser
+
+    root = tmp_path / "capture"
+    root.mkdir()
+    shutil.copy(SAMPLE, root / "events.jsonl")
+    for command in (["analyze", str(root)], ["export", str(root)]):
+        args = build_parser().parse_args(command)
+        args.func(args)
+
+    async def run():
+        with _Running(tmp_path) as workspace:
+            shared = next(h.name for h in workspace.sessions
+                          if h.redaction == "sanitised")
+            async with await _browser() as browser:
+                page = await browser.new_page()
+                await page.goto(workspace.url, wait_until="load")
+                await page.wait_for_selector("#session-picker")
+                await page.select_option("#session-picker", shared)
+                await page.wait_for_function(
+                    "document.getElementById('redaction').textContent === 'SANITISED'")
+                classes = await page.get_attribute("#redaction", "class")
+                assert "badge-safe" in classes
+
+    asyncio.run(run())

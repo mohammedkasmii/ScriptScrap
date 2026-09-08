@@ -42,7 +42,9 @@ def test_a_marker_anywhere_in_the_model_never_reaches_the_shared_report():
     assert MARKER not in render(safe)
 
 
-def test_the_export_writes_both_artifacts(tmp_path):
+def test_the_export_writes_every_artifact(tmp_path):
+    """Three now, not two: `session.sqlite` is what makes the export openable
+    in the workspace, so SANITISED mode can be entered at all."""
     root = tmp_path / "session"
     root.mkdir()
     shutil.copy(SAMPLE, root / "events.jsonl")
@@ -50,7 +52,8 @@ def test_the_export_writes_both_artifacts(tmp_path):
         build_parser().parse_args(["export", str(root)]))
 
     shared = root / "export" / "shared"
-    assert sorted(p.name for p in shared.iterdir()) == ["dataset.json", "report.md"]
+    assert sorted(p.name for p in shared.iterdir()) == [
+        "dataset.json", "report.md", "session.sqlite"]
 
 
 def test_the_report_says_when_it_truncated_a_table():

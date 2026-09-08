@@ -30,7 +30,11 @@ from .models import ANALYSIS_VERSION, AnalysisResult
 #    analysis_runs.log_sha256, the events table and its four indexes).
 # 2: workflow_steps, plus state_transitions.trigger_type, .trigger_element_key
 #    and .trigger_event_id (Plan C).
-STORE_SCHEMA_VERSION = 2
+# 3: state_transitions.trigger and findings.message become nullable. Both are
+#    free text the export policy drops, and this store now persists a SANITISED
+#    model as well as a raw one. NOT NULL said the derived model always has
+#    them; a sanitised one legitimately does not.
+STORE_SCHEMA_VERSION = 3
 
 
 class StoreSchemaError(RuntimeError):
@@ -187,7 +191,10 @@ CREATE TABLE IF NOT EXISTS state_transitions (
     run_id            INTEGER NOT NULL REFERENCES analysis_runs(id),
     from_state        TEXT    NOT NULL,
     to_state          TEXT    NOT NULL,
-    trigger           TEXT    NOT NULL,
+    -- Nullable: a human label like "user_click #Delete", dropped by the export
+    -- policy. `trigger_type` and `trigger_element_key` survive sanitisation and
+    -- are the machine-readable half.
+    trigger           TEXT,
     trigger_type        TEXT,
     trigger_element_key TEXT,
     trigger_event_id    TEXT,
@@ -226,7 +233,7 @@ CREATE TABLE IF NOT EXISTS findings (
     run_id       INTEGER NOT NULL REFERENCES analysis_runs(id),
     kind         TEXT    NOT NULL,
     severity     TEXT    NOT NULL,
-    message      TEXT    NOT NULL,
+    message      TEXT,          -- nullable: free text, dropped by the export policy
     count        INTEGER NOT NULL,
     evidence_ids TEXT    NOT NULL
 );

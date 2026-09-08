@@ -110,7 +110,7 @@ browser, so a session can be analysed and re-analysed from any machine.
 
 ```bash
 uv run scriptscrap analyze v13_investigation_output   # -> session.sqlite + analysis/report.md
-uv run scriptscrap export  v13_investigation_output   # -> export/shared/dataset.json
+uv run scriptscrap export  v13_investigation_output   # -> export/shared/
 ```
 
 `events.jsonl` is the source of truth; `session.sqlite` is derived and
@@ -131,7 +131,16 @@ longer match rather than returning whatever now sits at that offset.
 
 `export` writes a **sanitised** dataset: credentials removed, identifiers and
 emails replaced by deterministic pseudonyms so value propagation stays
-analysable, and no raw bodies, screenshots or HTML.
+analysable, and no raw bodies, screenshots or HTML. Sanitisation is deny by
+default — a model field with no declared disposition is an error, not a value
+that passes through — so adding a field to the analysis cannot silently add it
+to a shareable export.
+
+`export/shared/` holds `dataset.json`, `report.md` and a `session.sqlite`
+derived from the same sanitised model, so `scriptscrap workspace` can open it
+and the header reads **SANITISED**. It carries no event log: evidence
+drill-through is unavailable there by construction, and the workspace says so
+rather than showing an empty panel.
 
 ## Browsing a session
 

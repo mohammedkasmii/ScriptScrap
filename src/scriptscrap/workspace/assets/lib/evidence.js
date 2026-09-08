@@ -9,13 +9,22 @@
 // nobody has opened would make the index pointless.
 
 import { clear, disclosure, el, shortTime } from './dom.js';
-import { get } from './api.js';
+import { get, hasEvidence } from './api.js';
 
 /** A `<details>` that fetches its events the first time it is opened. */
 export function evidenceList(eventIds, { label = 'Evidence' } = {}) {
   const ids = eventIds || [];
   if (!ids.length) {
     return el('p', { class: 'evidence-none', text: 'No evidence cited.' });
+  }
+  if (!hasEvidence()) {
+    // A sanitised export cites event ids for a log the recipient does not
+    // have. Offering a disclosure that 409s on open would be an affordance
+    // that exists to fail; saying so once is the honest version.
+    return el('p', { class: 'evidence-none', text:
+      `${ids.length} event${ids.length === 1 ? '' : 's'} support this. The raw `
+      + 'events stay in the local session directory; this sanitised export '
+      + 'carries derived knowledge only.' });
   }
 
   const summary = el('span', {},

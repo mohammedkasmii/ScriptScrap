@@ -29,13 +29,22 @@ class SessionError(RuntimeError):
 
 @dataclass(frozen=True)
 class SessionHandle:
-    """One openable session."""
+    """One openable session.
+
+    `log_path` is None for a sanitised export: it has no raw log, by design.
+    Every route that needs a payload checks, and says so, rather than failing
+    on a path that does not exist.
+    """
 
     name: str
     root: Path
-    log_path: Path
     db_path: Path
     redaction: str
+    log_path: Path | None = None
+
+    @property
+    def has_evidence(self) -> bool:
+        return self.log_path is not None
 
     @property
     def manifest_path(self) -> Path:
@@ -99,7 +108,8 @@ def _name_for(root: Path, base: Path | None) -> str:
 
 
 def is_session(path: Path) -> bool:
-    return (path / "events.jsonl").is_file()
+    """A session is a derived store. The raw log is what makes it UNREDACTED."""
+    return (path / "session.sqlite").is_file()
 
 
 def open_session(path: str | Path, *, base: Path | None = None) -> SessionHandle:
@@ -113,22 +123,28 @@ def open_session(path: str | Path, *, base: Path | None = None) -> SessionHandle
     if not root.is_dir():
         raise SessionError(f"{root} is not a directory")
 
-    log = root / "events.jsonl"
-    if not log.is_file():
-        raise SessionError(
-            f"{root} holds no events.jsonl; it is not an investigation session")
-
     db = root / "session.sqlite"
+    log = root / "events.jsonl"
+    redaction = _redaction_of(root)
+
     if not db.is_file():
+        if log.is_file():
+            raise SessionError(
+                f"{root} has no session.sqlite. "
+                f"Run `scriptscrap analyze {root}` first.")
         raise SessionError(
-            f"{root} has no session.sqlite. Run `scriptscrap analyze {root}` first.")
+            f"{root} holds no session.sqlite; it is not an investigation session")
+    if redaction == UNREDACTED and not log.is_file():
+        # A raw session directory without its log is a session whose evidence
+        # has been moved away, not a sanitised one. Say which.
+        raise SessionError(
+            f"{root} has a derived store but no events.jsonl; evidence "
+            "drill-through would be impossible. If this is a sanitised export, "
+            "it belongs at export/shared.")
 
     return SessionHandle(
-        name=_name_for(root, base),
-        root=root,
-        log_path=log,
-        db_path=db,
-        redaction=_redaction_of(root),
+        name=_name_for(root, base), root=root, db_path=db, redaction=redaction,
+        log_path=log if log.is_file() else None,
     )
 
 
@@ -159,6 +175,6 @@ def discover_sessions(path: str | Path) -> list[SessionHandle]:
     if not sessions:
         raise SessionError(
             f"no analysed session found at {root}. A session directory holds "
-            "events.jsonl and session.sqlite; run `scriptscrap analyze` to "
-            "produce the latter.")
+            "session.sqlite, derived from events.jsonl; run "
+            "`scriptscrap analyze` to produce it.")
     return sessions

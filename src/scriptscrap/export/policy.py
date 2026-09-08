@@ -442,7 +442,14 @@ POLICY: dict[tuple[str, str], Disposition] = {
     ("LocatorCandidate", "warning_code"): Disposition.REASON_CODE,
 
     # --- UIElement -------------------------------------------------------
-    ("UIElement", "key"): Disposition.DROP,   # tag|role|label|text|name|type|form
+    # FINGERPRINT, not DROP. The key is tag|role|label|text|name|type|form, so
+    # it cannot go out verbatim -- but it is also the JOIN between an element,
+    # the workflow steps that touched it and the transitions it triggered.
+    # Dropping it made every key None, which collapsed the join: a sanitised
+    # Playwright script gave every step the last element's locator, and the
+    # sanitised store could not be written at all (element_key is NOT NULL).
+    # A salted digest keeps the join and carries none of the text.
+    ("UIElement", "key"): Disposition.FINGERPRINT,
     # Both come straight off the page. `role` in particular is an author-
     # supplied attribute -- `role="CustomerAlice"` is legal markup -- so both
     # are checked against a vocabulary rather than trusted for looking tidy.
@@ -482,7 +489,7 @@ POLICY: dict[tuple[str, str], Disposition] = {
     # EventType, with no element name attached -- as the exportable half.
     ("StateTransition", "trigger"): Disposition.DROP,
     ("StateTransition", "trigger_type"): Disposition.REASON_CODE,
-    ("StateTransition", "trigger_element_key"): Disposition.DROP,
+    ("StateTransition", "trigger_element_key"): Disposition.FINGERPRINT,
     ("StateTransition", "trigger_event_id"): Disposition.EVIDENCE,
     ("StateTransition", "observation_count"): Disposition.COUNTS,
     ("StateTransition", "evidence"): Disposition.STRUCTURAL,
@@ -537,7 +544,7 @@ POLICY: dict[tuple[str, str], Disposition] = {
     ("WorkflowStep", "ordinal"): Disposition.COUNTS,
     ("WorkflowStep", "seq"): Disposition.COUNTS,
     ("WorkflowStep", "kind"): Disposition.REASON_CODE,
-    ("WorkflowStep", "element_key"): Disposition.DROP,   # tag|role|label|text|...
+    ("WorkflowStep", "element_key"): Disposition.FINGERPRINT,
     ("WorkflowStep", "url_pattern"): Disposition.ROUTE,
     ("WorkflowStep", "repeat_count"): Disposition.COUNTS,
     ("WorkflowStep", "value_recorded"): Disposition.COUNTS,

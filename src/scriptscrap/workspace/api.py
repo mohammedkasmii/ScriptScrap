@@ -28,6 +28,10 @@ class BadRequest(ValueError):
     """The query asked for something malformed."""
 
 
+class EvidenceUnavailable(LookupError):
+    """This session has no raw log, so a payload cannot be served."""
+
+
 # --- helpers --------------------------------------------------------------
 
 def _loads(value: Any, default: Any = None) -> Any:
@@ -62,6 +66,11 @@ def _handle(workspace, query) -> SessionHandle:
 
 
 def _store(handle: SessionHandle) -> EventStore:
+    if handle.log_path is None:
+        raise EvidenceUnavailable(
+            "this is a sanitised export: it carries derived knowledge only, and "
+            "the raw events it was derived from stay in the local session "
+            "directory. Open that session to drill through to evidence.")
     return EventStore(handle.db_path, handle.log_path)
 
 
@@ -101,6 +110,7 @@ def sessions(workspace, query) -> dict:
             "event_count": row["event_count"] if row else 0,
             "analysis_version": row["analysis_version"] if row else None,
             "redaction": handle.redaction,
+            "has_evidence": handle.has_evidence,
         })
     return {"sessions": out}
 
@@ -138,13 +148,19 @@ def session_overview(workspace, query) -> dict:
         conn.close()
 
     manifest = handle.manifest()
-    store = _store(handle)
-    try:
-        by_type = store.counts_by_type()
-        by_source = store.counts_by_source()
-        span = store.seq_range()
-    finally:
-        store.close()
+    by_type: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    span = None
+    if handle.has_evidence:
+        # A sanitised export has no log to count events in. The overview is
+        # still the right page for it: everything else on it is derived.
+        store = _store(handle)
+        try:
+            by_type = store.counts_by_type()
+            by_source = store.counts_by_source()
+            span = store.seq_range()
+        finally:
+            store.close()
 
     return {
         "name": handle.name,
@@ -154,6 +170,7 @@ def session_overview(workspace, query) -> dict:
         "event_count": run["event_count"],
         "log_size": run["log_size"],
         "redaction": handle.redaction,
+        "has_evidence": handle.has_evidence,
         "counts": counts,
         "findings": findings,
         "events_by_type": by_type,

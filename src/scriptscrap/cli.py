@@ -98,9 +98,19 @@ def cmd_export(args: argparse.Namespace) -> int:
         encoding="utf-8")
     (target / "report.md").write_text(render(safe), encoding="utf-8")
 
+    # The sanitised twin's derived store, written by the SAME writer from the
+    # SAME sanitised model. A second store writer, or a second read path in the
+    # workspace, would be a second thing to keep correct.
+    store_path = target / "session.sqlite"
+    if store_path.exists():
+        store_path.unlink()
+    with DerivedStore(store_path) as store:
+        store.write(safe)
+
     stats = redactor.stats()
     print(f"shareable dataset  {dataset_path}")
     print(f"report             {target / 'report.md'}")
+    print(f"derived store      {store_path}")
     print(f"credentials removed  {stats['credentials_removed']}")
     print(f"values pseudonymised {stats['values_pseudonymised']} "
           f"({stats['distinct_pseudonyms']} distinct)")

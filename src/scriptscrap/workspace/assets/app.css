@@ -317,3 +317,10 @@ details[open] > summary::before { content: "▾"; }
           overflow-x: auto; padding: 8px; }
   #content { padding: 16px 12px 60px; }
 }
+
+/* A sanitised export carries no event log. `evidenceList` says so in place of
+   each drill-through; this hides the affordances that would only 409. */
+body.no-evidence .timeline-link,
+body.no-evidence [data-view="timeline"] {
+  display: none;
+}

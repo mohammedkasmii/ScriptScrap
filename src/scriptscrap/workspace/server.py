@@ -219,6 +219,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, str(exc))
         except api.BadRequest as exc:
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        except api.EvidenceUnavailable as exc:
+            # 409, not 404: the record exists in the session this was derived
+            # from. It is this COPY that deliberately does not carry it.
+            self._error(HTTPStatus.CONFLICT, str(exc))
         except Exception as exc:                       # noqa: BLE001
             # Surfaced, not swallowed: a stale evidence index or a missing log
             # is exactly what the reader needs told, and a blank panel would

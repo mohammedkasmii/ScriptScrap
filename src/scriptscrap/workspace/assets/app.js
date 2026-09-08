@@ -78,7 +78,8 @@ async function boot() {
 
 function selectSession(name) {
   const session = sessions.find((s) => s.name === name) || sessions[0];
-  setSession(session.name);
+  setSession(session.name, session.has_evidence !== false);
+  document.body.classList.toggle('no-evidence', session.has_evidence === false);
   picker.value = session.name;
 
   // The most important thing on the page. A session directory and its

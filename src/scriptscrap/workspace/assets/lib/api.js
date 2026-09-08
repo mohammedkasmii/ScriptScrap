@@ -8,13 +8,21 @@
 // raw capture and its sanitised export, and choosing between them is not the
 // server's call.
 let currentSession = null;
+// Whether the open session carries the raw log its conclusions cite. A
+// sanitised export does not, by construction.
+let currentHasEvidence = true;
 
-export function setSession(name) {
+export function setSession(name, hasEvidence = true) {
   currentSession = name;
+  currentHasEvidence = hasEvidence !== false;
 }
 
 export function getSession() {
   return currentSession;
+}
+
+export function hasEvidence() {
+  return currentHasEvidence;
 }
 
 export class ApiError extends Error {
