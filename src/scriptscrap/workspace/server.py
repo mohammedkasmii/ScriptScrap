@@ -273,6 +273,16 @@ class Workspace:
         self.config = config
         self.token = config.token or secrets.token_urlsafe(32)
         self.sessions: list[SessionHandle] = discover_sessions(config.root)
+        names = [handle.name for handle in self.sessions]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            # session(name) returns the first match, so a duplicate silently
+            # serves one session's data under another's name -- with a
+            # redaction badge that is right about the mode and wrong about the
+            # session.
+            raise SessionError(
+                "two sessions share a name and cannot both be addressed: "
+                + ", ".join(duplicates))
         self.routes: dict[str, Callable] = dict(api.ROUTES)
         self._dynamic = api.DYNAMIC_ROUTES
         self._lock = threading.Lock()
@@ -284,9 +294,18 @@ class Workspace:
 
     # -- session access ----------------------------------------------------
     def session(self, name: str | None) -> SessionHandle:
-        """One session by name; the only one when a name is not given."""
+        """One session by name; the only one when a name is not given.
+
+        Defaulting to `self.sessions[0]` served whichever session sorted first,
+        which in a workspace holding both an unredacted capture and its
+        sanitised export is a choice no caller intended to make.
+        """
         if name is None:
-            return self.sessions[0]
+            if len(self.sessions) == 1:
+                return self.sessions[0]
+            raise api.BadRequest(
+                "this workspace holds several sessions; pass session=<name>. "
+                "Available: " + ", ".join(h.name for h in self.sessions))
         for handle in self.sessions:
             if handle.name == name:
                 return handle

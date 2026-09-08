@@ -78,11 +78,31 @@ def _redaction_of(root: Path) -> str:
     return UNREDACTED
 
 
+def _name_for(root: Path, base: Path | None) -> str:
+    """A name that identifies the session, not just its last path segment.
+
+    `export/shared` is a session's sanitised twin, and two of them are both
+    called `shared`. The name is what the session picker addresses, so it has
+    to be unique -- and it has to say WHICH session, or the picker offers two
+    identical entries.
+    """
+    if base is None or root == base:
+        return root.name
+    try:
+        relative = root.relative_to(base)
+    except ValueError:
+        return root.name
+    parts = relative.parts
+    if parts[-2:] == ("export", "shared"):
+        return f"{'/'.join(parts[:-2]) or base.name} (shared)"
+    return "/".join(parts)
+
+
 def is_session(path: Path) -> bool:
     return (path / "events.jsonl").is_file()
 
 
-def open_session(path: str | Path) -> SessionHandle:
+def open_session(path: str | Path, *, base: Path | None = None) -> SessionHandle:
     """Open one session directory.
 
     Raises rather than degrades: a workspace that opens a session with no
@@ -104,7 +124,7 @@ def open_session(path: str | Path) -> SessionHandle:
             f"{root} has no session.sqlite. Run `scriptscrap analyze {root}` first.")
 
     return SessionHandle(
-        name=root.name,
+        name=_name_for(root, base),
         root=root,
         log_path=log,
         db_path=db,
@@ -133,7 +153,7 @@ def discover_sessions(path: str | Path) -> list[SessionHandle]:
         for candidate in (child, child / "export" / "shared"):
             if is_session(candidate):
                 try:
-                    sessions.append(open_session(candidate))
+                    sessions.append(open_session(candidate, base=root))
                 except SessionError:
                     continue
     if not sessions:

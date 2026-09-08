@@ -3,6 +3,10 @@
 // Same-origin only; the CSP forbids anything else. The token travels in a
 // cookie set on first load, so nothing here handles it.
 
+// `session` is set before any view renders (app.js boot()), because the server
+// refuses an ambiguous request rather than picking one: a workspace can hold a
+// raw capture and its sanitised export, and choosing between them is not the
+// server's call.
 let currentSession = null;
 
 export function setSession(name) {
