@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -33,6 +34,11 @@ def _resolve_log(session: Path) -> Path:
     raise SystemExit(f"no events.jsonl found at {session}")
 
 
+# Finding kinds that mean the LOG cannot be indexed, as opposed to conclusions
+# drawn from it being weak.
+_INTEGRITY_KINDS = frozenset({"duplicate_event_id"})
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     session = Path(args.session)
     log = _resolve_log(session)
@@ -48,7 +54,21 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             # Never silent. A store that vanished without a line of output
             # would look like data loss.
             print(f"rebuilt {db_path}: it was written by an earlier store schema")
-        run_id = store.write(result)
+        try:
+            run_id = store.write(result)
+        except sqlite3.IntegrityError as exc:
+            # The LOG is the defect, not the tool. An IntegrityError traceback
+            # names a SQLite index and reads like ScriptScrap failed; the
+            # finding says which id repeats and why that makes citations
+            # meaningless.
+            blocking = [f for f in result.findings
+                        if f.severity == "critical" and f.kind in _INTEGRITY_KINDS]
+            if not blocking:
+                raise
+            raise SystemExit(
+                "refusing to index this log:\n  "
+                + "\n  ".join(f.message for f in blocking)
+                + f"\n\n({exc})") from None
         if store.replaced:
             print(f"  replaced {store.replaced} superseded run(s)")
             # VACUUM reclaims the freed pages; without it the file keeps them

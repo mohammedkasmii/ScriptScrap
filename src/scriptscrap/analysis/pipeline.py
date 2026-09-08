@@ -115,6 +115,7 @@ def analyze_log(path: str | Path) -> AnalysisResult:
     reader = EventLogReader(path, with_offsets=True)
     session_id = reader.events[0].session_id if reader.events else "unknown"
     result = analyze_events(list(reader), session_id)
+    result.findings.extend(_log_integrity_findings(reader))
 
     index: list[EventIndexRow] = []
     for event in reader.events:
@@ -140,6 +141,29 @@ def analyze_log(path: str | Path) -> AnalysisResult:
     result.log_size = log.stat().st_size
     result.log_sha256 = _sha256_of(log)
     return result
+
+
+def _log_integrity_findings(reader: EventLogReader) -> list[Finding]:
+    """Structural defects in the log itself.
+
+    `EventLogReader.validate` has detected these since M1 and nothing acted on
+    them. A duplicated event id in particular makes every citation of that id
+    ambiguous, and the evidence index resolves it with fetchone().
+    """
+    findings: list[Finding] = []
+    for problem in reader.validate():
+        if problem.kind == "duplicate_event_id":
+            findings.append(Finding(
+                kind="duplicate_event_id", severity="critical",
+                message=(f"the log repeats an event id ({problem.detail}); every "
+                         "citation of it is ambiguous and the evidence index "
+                         "will refuse to store it"),
+                count=1))
+        elif problem.kind in ("duplicate_seq", "unordered", "sequence_gap"):
+            findings.append(Finding(
+                kind="log_integrity", severity="warning",
+                message=f"{problem.kind}: {problem.detail}", count=1))
+    return findings
 
 
 def _sha256_of(path: Path) -> str:

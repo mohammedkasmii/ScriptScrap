@@ -24,7 +24,10 @@ from typing import Any
 #    run gained the log fingerprint those offsets are only valid against.
 # 3: the derived model gained an ordered workflow and a machine-readable link
 #    from a state transition to the element that triggered it.
-ANALYSIS_VERSION = 3
+# 4: analysis surfaces the log's own integrity problems as findings
+#    (duplicate_event_id, log_integrity), which EventLogReader.validate had
+#    detected since M1 with nothing acting on them.
+ANALYSIS_VERSION = 4
 
 
 @dataclass(slots=True)

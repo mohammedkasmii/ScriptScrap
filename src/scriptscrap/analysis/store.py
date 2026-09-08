@@ -34,7 +34,8 @@ from .models import ANALYSIS_VERSION, AnalysisResult
 #    free text the export policy drops, and this store now persists a SANITISED
 #    model as well as a raw one. NOT NULL said the derived model always has
 #    them; a sanitised one legitimately does not.
-STORE_SCHEMA_VERSION = 3
+# 4: ix_events_id is UNIQUE, so a duplicated event id cannot enter the index.
+STORE_SCHEMA_VERSION = 4
 
 
 class StoreSchemaError(RuntimeError):
@@ -247,7 +248,9 @@ CREATE INDEX IF NOT EXISTS ix_selectors_elem ON selectors(element_id);
 
 -- Evidence drill-through is a point lookup by event_id; the timeline is a
 -- filtered walk in seq order. Both are the workspace's hot path.
-CREATE INDEX IF NOT EXISTS ix_events_id     ON events(run_id, event_id);
+-- UNIQUE: an event id that resolves to two rows makes every citation of it
+-- ambiguous, and `EventStore.get` uses fetchone().
+CREATE UNIQUE INDEX IF NOT EXISTS ix_events_id ON events(run_id, event_id);
 CREATE INDEX IF NOT EXISTS ix_events_seq    ON events(run_id, seq);
 CREATE INDEX IF NOT EXISTS ix_events_type   ON events(run_id, type, seq);
 CREATE INDEX IF NOT EXISTS ix_events_source ON events(run_id, source, seq);
