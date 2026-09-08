@@ -126,13 +126,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     # -- method policy -----------------------------------------------------
     def _reject_write(self) -> None:
-        """No route mutates anything, so no method that implies it is served."""
+        """No route mutates anything, so no method that implies it is served.
+
+        OPTIONS is here too: it fell through to the stdlib default and answered
+        501 with no Allow header, which says 'not implemented' about a policy
+        that is very deliberately implemented.
+        """
         self.send_response(int(HTTPStatus.METHOD_NOT_ALLOWED))
         self.send_header("Allow", "GET, HEAD")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    do_POST = do_PUT = do_DELETE = do_PATCH = _reject_write
+    do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _reject_write
 
     def do_HEAD(self) -> None:
         self.do_GET()

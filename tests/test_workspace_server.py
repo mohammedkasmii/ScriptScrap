@@ -461,3 +461,28 @@ def test_the_port_is_released_after_shutdown(session_root):
         probe.bind((host, port))          # must not raise
     finally:
         probe.close()
+
+
+# --- the method policy applies to every non-read method (R6) --------------
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+def test_every_non_read_method_answers_with_the_same_policy(workspace, method):
+    conn = http.client.HTTPConnection(*workspace.address, timeout=5)
+    try:
+        conn.request(method, f"/api/sessions?t={workspace.token}")
+        response = conn.getresponse()
+        response.read()
+        assert response.status == 405
+        assert response.getheader("Allow") == "GET, HEAD"
+    finally:
+        conn.close()
+
+
+def test_a_read_method_is_not_rejected(workspace):
+    for method in ("GET", "HEAD"):
+        conn = http.client.HTTPConnection(*workspace.address, timeout=5)
+        try:
+            conn.request(method, f"/api/sessions?t={workspace.token}")
+            assert conn.getresponse().status == 200
+        finally:
+            conn.close()
