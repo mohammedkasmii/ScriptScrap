@@ -418,12 +418,46 @@ def states(workspace, query) -> dict:
             "from_label": label_of.get(t["from_state"], t["from_state"]),
             "to_label": label_of.get(t["to_state"], t["to_state"]),
             "trigger": t["trigger"],
+            # The stable link. `trigger` is a human label; joining a view on it
+            # matched nothing, so every transition read "no element recorded".
+            "trigger_type": t["trigger_type"],
+            "trigger_element_key": t["trigger_element_key"],
+            "trigger_event_id": t["trigger_event_id"],
             "observation_count": t["observation_count"],
             "evidence_ids": _loads(t["evidence_ids"], []),
         } for t in conn.execute(
             "SELECT * FROM state_transitions WHERE run_id=? "
             "ORDER BY observation_count DESC", (run_id,))]
         return {"states": rows, "transitions": transitions}
+    finally:
+        conn.close()
+
+
+# --- workflow -------------------------------------------------------------
+
+def workflow(workspace, query) -> dict:
+    """The observed workflow, in the order it happened.
+
+    Ordered by `ordinal`, which analysis derived from `seq`. Never re-sorted
+    here: a view that re-ordered the workflow would be inventing one.
+    """
+    handle = _handle(workspace, query)
+    conn = handle.connect()
+    try:
+        run_id = _run_id(conn)
+        return {"steps": [{
+            "ordinal": r["ordinal"],
+            "seq": r["seq"],
+            "kind": r["kind"],
+            "element_key": r["element_key"],
+            "url_pattern": r["url_pattern"],
+            "repeat_count": r["repeat_count"],
+            "value_recorded": bool(r["value_recorded"]),
+            "key": r["key"],
+            "evidence_ids": _loads(r["evidence_ids"], []),
+        } for r in conn.execute(
+            "SELECT * FROM workflow_steps WHERE run_id=? ORDER BY ordinal",
+            (run_id,))]}
     finally:
         conn.close()
 
@@ -599,6 +633,7 @@ ROUTES = {
     "event": event,
     "timeline": timeline,
     "states": states,
+    "workflow": workflow,
     "ui_elements": ui_elements,
     "schemas": schemas,
     "dependencies": dependencies,

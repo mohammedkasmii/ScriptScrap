@@ -28,7 +28,9 @@ from .models import ANALYSIS_VERSION, AnalysisResult
 #
 # 1: the schema as of the events-index work (analysis_runs.log_size,
 #    analysis_runs.log_sha256, the events table and its four indexes).
-STORE_SCHEMA_VERSION = 1
+# 2: workflow_steps, plus state_transitions.trigger_type, .trigger_element_key
+#    and .trigger_event_id (Plan C).
+STORE_SCHEMA_VERSION = 2
 
 
 class StoreSchemaError(RuntimeError):
@@ -186,9 +188,28 @@ CREATE TABLE IF NOT EXISTS state_transitions (
     from_state        TEXT    NOT NULL,
     to_state          TEXT    NOT NULL,
     trigger           TEXT    NOT NULL,
+    trigger_type        TEXT,
+    trigger_element_key TEXT,
+    trigger_event_id    TEXT,
     observation_count INTEGER NOT NULL,
     evidence_ids      TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES analysis_runs(id),
+    ordinal         INTEGER NOT NULL,
+    seq             INTEGER NOT NULL,
+    kind            TEXT    NOT NULL,
+    element_key     TEXT,
+    url_pattern     TEXT,
+    repeat_count    INTEGER NOT NULL,
+    value_recorded  INTEGER NOT NULL,
+    key             TEXT,
+    evidence_ids    TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_workflow_run ON workflow_steps(run_id, ordinal);
 
 CREATE TABLE IF NOT EXISTS technologies (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -331,7 +352,7 @@ class DerivedStore:
                     f"(SELECT id FROM ui_elements WHERE run_id IN ({marks}))", stale)
         for table in ("events", "endpoints", "schemas", "dependencies",
                       "ui_elements", "states", "state_transitions",
-                      "technologies", "findings"):
+                      "workflow_steps", "technologies", "findings"):
             cur.execute(f"DELETE FROM {table} WHERE run_id IN ({marks})", stale)  # noqa: S608
         cur.execute(f"DELETE FROM analysis_runs WHERE id IN ({marks})", stale)  # noqa: S608
         return len(stale)
@@ -455,10 +476,23 @@ class DerivedStore:
         for transition in result.transitions:
             cur.execute(
                 "INSERT INTO state_transitions (run_id, from_state, to_state, trigger,"
-                " observation_count, evidence_ids) VALUES (?,?,?,?,?,?)",
+                " trigger_type, trigger_element_key, trigger_event_id,"
+                " observation_count, evidence_ids) VALUES (?,?,?,?,?,?,?,?,?)",
                 (run_id, transition.from_state, transition.to_state, transition.trigger,
+                 transition.trigger_type, transition.trigger_element_key,
+                 transition.trigger_event_id,
                  transition.observation_count, _dumps(transition.evidence.event_ids)),
             )
+
+        cur.executemany(
+            "INSERT INTO workflow_steps (run_id, ordinal, seq, kind, element_key,"
+            " url_pattern, repeat_count, value_recorded, key, evidence_ids)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(run_id, step.ordinal, step.seq, step.kind, step.element_key,
+              step.url_pattern, step.repeat_count, int(step.value_recorded),
+              step.key, _dumps(step.evidence.event_ids))
+             for step in result.workflow],
+        )
 
         for tech in result.technologies:
             cur.execute(
@@ -505,7 +539,7 @@ class DerivedStore:
 # of interpolated from caller input.
 ALLOWED_TABLES = frozenset({
     "endpoints", "schemas", "dependencies", "ui_elements",
-    "states", "state_transitions", "technologies", "findings",
+    "states", "state_transitions", "workflow_steps", "technologies", "findings",
 })
 ALLOWED_CHILD_TABLES = frozenset({"endpoint_params", "schema_fields", "selectors"})
 ALLOWED_FKS = frozenset({"endpoint_id", "schema_id", "element_id"})

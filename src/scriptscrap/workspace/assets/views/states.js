@@ -56,10 +56,17 @@ export async function render(root) {
   if (transitions.length) {
     root.append(el('section', { class: 'panel' },
       el('h2', { text: 'Transitions' }),
-      table(['From', 'To', 'Trigger', 'Seen', 'Evidence'], transitions.map((t) => [
+      el('p', { class: 'hint', text:
+        'The element column is the semantic key analysis resolved the trigger to. '
+        + 'A dash means the transition followed a navigation with no element, or '
+        + 'no candidate was observed close enough in time to name one.' }),
+      table(['From', 'To', 'Trigger', 'Element', 'Seen', 'Evidence'], transitions.map((t) => [
         t.from_label,
         t.to_label,
         el('code', { text: t.trigger }),
+        t.trigger_element_key
+          ? el('code', { class: 'muted', text: t.trigger_element_key })
+          : el('span', { class: 'muted', text: '—' }),
         t.observation_count,
         evidenceList(t.evidence_ids, { label: 'Events' }),
       ])),

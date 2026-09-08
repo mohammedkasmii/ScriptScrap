@@ -66,3 +66,4 @@ what that build put there, and deleting another version's work is not its call.
 | Store schema | Analysis | Change | Landed in |
 |---|---|---|---|
 | 1 | 2 | `analysis_runs.log_size`, `analysis_runs.log_sha256`, the `events` table and its four indexes. | `97c58c9`, retroactively stamped by the store-versioning commit |
+| 2 | 3 | `workflow_steps` and its index; `state_transitions.trigger_type`, `.trigger_element_key`, `.trigger_event_id`. Analysis bumps in the same release: the ordered action model, the public `semantic_key`, and the transition-to-element link. | the Plan C commits |
