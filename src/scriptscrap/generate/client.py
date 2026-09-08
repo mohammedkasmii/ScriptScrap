@@ -178,7 +178,12 @@ def _method(endpoint: Endpoint, *, taken: set[str]) -> str:
         for p in query:
             note = f"{p.name} ({p.inferred_type}, {p.distinct_values} distinct)"
             if p.enum_candidate:
-                note += " one of: " + ", ".join(map(str, p.enum_candidate))
+                # The COUNT, never the values. An enum candidate is a captured
+                # parameter value -- the same class of thing as `examples`,
+                # which this module has always refused to emit -- and a small
+                # distinct set is exactly the shape an API key or a tenant id
+                # takes in a short session.
+                note += f" looks enumerable: {len(p.enum_candidate)} value(s)"
             lines.append(f"        #   {py_comment(note, 100)}")
     lines.append("        # evidence: "
                  + py_comment(", ".join(endpoint.evidence.event_ids[:8]), 100))

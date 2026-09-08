@@ -151,14 +151,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
     """Turn the derived model into a runnable starting point."""
     from .generate import GeneratedSourceError
 
+    sanitised = getattr(args, "sanitised", False)
+    if sanitised and args.kind != "playwright":
+        # Accepting it would imply the client had something to sanitise. It
+        # does not: it carries routes and names, and no observed value.
+        raise SystemExit("--sanitised applies to the playwright generator only")
+
     session = Path(args.session)
     log = _resolve_log(session)
     root = log.parent
     result = analyze_log(log)
 
     filename, description = GENERATORS[args.kind]
+    extra = {"sanitised": True} if sanitised else {}
     try:
-        source = _render_for(args.kind)(result, session_name=root.name)
+        source = _render_for(args.kind)(result, session_name=root.name, **extra)
     except GeneratedSourceError as exc:
         # Nothing is written. A file that does not compile is worse than no
         # file: the reader discovers it three steps into a debugging session.
@@ -175,6 +182,15 @@ def cmd_generate(args: argparse.Namespace) -> int:
         print("  supply them via SCRIPTSCRAP_AUTH_HEADERS; no value was captured")
     print("\nThis describes ONE observed session. Routes nobody visited are "
           "not in it.")
+    if args.kind == "playwright" and not sanitised:
+        # Said at the point of exposure, not only in a file nobody opens --
+        # the same posture cmd_workspace takes about serving a raw capture.
+        print("\n  !  UNREDACTED: this script's locators, labels and element "
+              "text come")
+        print("     from the captured application and may contain sensitive "
+              "data.")
+        print("     Read it before you commit it. For a shareable variant:")
+        print(f"       scriptscrap generate playwright {args.session} --sanitised")
     return 0
 
 
@@ -251,9 +267,16 @@ def build_parser() -> argparse.ArgumentParser:
     generate = sub.add_parser(
         "generate", help="derive a runnable starting point from an analysed session")
     generate.add_argument("kind", choices=sorted(GENERATORS),
-                          help="client: an httpx client. playwright: a browser script.")
+                          help="client: an httpx client, carries no captured "
+                               "value. playwright: a browser script -- "
+                               "UNREDACTED, its locators come from the "
+                               "application and may contain sensitive data.")
     generate.add_argument("session", help="session directory or events.jsonl path")
     generate.add_argument("-o", "--output", help="write here instead of the session directory")
+    generate.add_argument("--sanitised", action="store_true",
+                          help="playwright only: a shareable variant. Locators "
+                               "that carried application text are removed and "
+                               "marked, and the script refuses to run.")
     generate.set_defaults(func=cmd_generate)
 
     return parser

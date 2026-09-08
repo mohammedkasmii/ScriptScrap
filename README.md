@@ -169,8 +169,17 @@ uv run scriptscrap generate playwright v13_investigation_output
 `client` writes an httpx client with a method per observed route. `playwright`
 writes the observed workflow using the most stable locator for each element.
 
-Both read the derived model and never the event log, so neither can embed a
-captured value. Credentials are read from the environment at runtime:
+`client` reads only shapes, parameter names and header names, so it carries no
+captured value — enforced by a test. `playwright` is **UNREDACTED**: a locator
+that does not name the real element cannot find it, so the script embeds
+locators, labels and element text read off the application. Its header, its
+`--help` and the command's own output all say so.
+
+`--sanitised` produces a shareable variant. Locators that carried application
+text are removed and marked in place, and the script deliberately refuses to
+run rather than pretending to work with selectors that cannot match.
+
+Credentials are read from the environment at runtime:
 
 ```bash
 export SCRIPTSCRAP_AUTH_HEADERS='{"Cookie": "..."}'
