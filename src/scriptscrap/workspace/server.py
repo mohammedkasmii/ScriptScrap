@@ -70,10 +70,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         routinely screen-shared while the operator explains what they found.
         """
 
-    def _send(self, status: HTTPStatus | int, body: bytes, content_type: str) -> None:
-        self.send_response(int(status))
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+    def _security_headers(self) -> None:
+        """The headers every response carries, whatever wrote it.
+
+        One method rather than a block copied into each response path. The
+        landing page wrote its own and was therefore the single page served
+        with no Content-Security-Policy -- the one page that executes the
+        application's JavaScript.
+        """
         # The workspace renders captured application content. It must never be
         # able to load anything else, or reach back out to a captured host.
         self.send_header(
@@ -83,11 +87,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         )
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # A token-bearing URL and an unredacted capture's JSON both belong in
+        # exactly one place: this process's memory.
+        self.send_header("Cache-Control", "no-store, max-age=0")
+
+    def _send(self, status: HTTPStatus | int, body: bytes, content_type: str) -> None:
+        self.send_response(int(status))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self._security_headers()
         if self._refresh_cookie:
             self.send_header("Set-Cookie", self._cookie_header())
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    def _redirect(self, location: str, *, set_cookie: str | None = None) -> None:
+        """See Other, so the browser re-requests without the query string.
+
+        303 rather than 302: the token must not survive in the address bar or
+        in history, and a 303 is the status that means 'the answer is at this
+        other URL, go and GET it'.
+        """
+        self.send_response(int(HTTPStatus.SEE_OTHER))
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
+        self._security_headers()
+        self.end_headers()
 
     def _json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -217,19 +245,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         body = candidate.read_bytes()
         if candidate.name == "index.html" and query.get("t"):
-            # Move the token out of the URL and into a cookie on first load, so
-            # it stops appearing in the address bar of a shared screen.
-            self.send_response(int(HTTPStatus.OK))
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header(
-                "Set-Cookie",
-                f"{COOKIE_NAME}={self.workspace.token}; Path=/; SameSite=Strict",
-            )
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
+            # Move the token out of the URL and into a cookie, by REDIRECTING.
+            # Serving 200 here left `?t=<token>` in the address bar and in
+            # history for the life of the session, which is what this branch
+            # exists to prevent.
+            self._redirect("/", set_cookie=self._cookie_header())
             return
 
         guessed, _ = mimetypes.guess_type(candidate.name)

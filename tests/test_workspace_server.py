@@ -149,8 +149,15 @@ def test_an_unknown_api_route_is_a_404_not_a_500(workspace):
     assert status == 404
 
 
-def test_the_index_sets_the_token_cookie_so_it_leaves_the_address_bar(workspace):
-    """The landing URL carries the token; after that it lives in a cookie.
+SECURITY_HEADERS = ("Content-Security-Policy", "X-Content-Type-Options",
+                    "Referrer-Policy", "Cache-Control")
+
+
+def test_the_landing_url_redirects_so_the_token_leaves_the_address_bar(workspace):
+    """The old test asserted only that a Set-Cookie header existed. The
+    response was a 200, so the browser kept `?t=<token>` in the address bar and
+    in history for the life of the session -- exactly what the code comment
+    said it prevented.
 
     A token that stays in the address bar is a token that ends up in a
     screenshot of the very window that displays an unredacted capture.
@@ -160,10 +167,67 @@ def test_the_index_sets_the_token_cookie_so_it_leaves_the_address_bar(workspace)
         conn.request("GET", f"/?t={workspace.token}")
         response = conn.getresponse()
         response.read()
-        assert response.status == 200
+        assert response.status == 303
+        assert response.getheader("Location") == "/"
         cookie = response.getheader("Set-Cookie") or ""
-        assert f"scriptscrap_token={workspace.token}" in cookie
+        assert f"{workspace.token}" in cookie
+        assert "HttpOnly" in cookie, "no script reads this cookie"
         assert "SameSite=Strict" in cookie
+    finally:
+        conn.close()
+
+
+def test_the_redirect_target_is_the_application(workspace):
+    status, body = request(workspace, "/", token=workspace.token)
+    assert status == 200
+    assert b"<title>" in body
+
+
+@pytest.mark.parametrize("path", ["/", "/app.js", "/app.css", "/lib/api.js"])
+def test_every_asset_response_carries_the_security_headers(workspace, path):
+    conn = http.client.HTTPConnection(*workspace.address, timeout=5)
+    try:
+        conn.request("GET", path)
+        response = conn.getresponse()
+        response.read()
+        for header in SECURITY_HEADERS:
+            assert response.getheader(header), f"{path} has no {header}"
+    finally:
+        conn.close()
+
+
+def test_the_landing_redirect_carries_the_security_headers(workspace):
+    """The one page that executes the application's JS was the one page served
+    without a Content-Security-Policy."""
+    conn = http.client.HTTPConnection(*workspace.address, timeout=5)
+    try:
+        conn.request("GET", f"/?t={workspace.token}")
+        response = conn.getresponse()
+        response.read()
+        for header in SECURITY_HEADERS:
+            assert response.getheader(header), f"the landing response has no {header}"
+    finally:
+        conn.close()
+
+
+def test_api_responses_are_not_cached(workspace):
+    conn = http.client.HTTPConnection(*workspace.address, timeout=5)
+    try:
+        conn.request("GET", f"/api/sessions?t={workspace.token}")
+        response = conn.getresponse()
+        response.read()
+        assert "no-store" in (response.getheader("Cache-Control") or "")
+    finally:
+        conn.close()
+
+
+def test_head_on_the_landing_url_also_redirects(workspace):
+    conn = http.client.HTTPConnection(*workspace.address, timeout=5)
+    try:
+        conn.request("HEAD", f"/?t={workspace.token}")
+        response = conn.getresponse()
+        assert response.status == 303
+        assert response.read() == b""
     finally:
         conn.close()
 
