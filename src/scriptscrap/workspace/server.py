@@ -276,6 +276,8 @@ class Workspace:
         self.routes: dict[str, Callable] = dict(api.ROUTES)
         self._dynamic = api.DYNAMIC_ROUTES
         self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._closed = False
 
         handler = type("_BoundHandler", (_Handler,), {"workspace": self})
         self.server = _Server((config.host, config.port), handler)
@@ -318,18 +320,46 @@ class Workspace:
         host, port = self.address
         return f"http://{host}:{port}/?t={self.token}"
 
+    def start(self) -> None:
+        """Serve on a daemon thread. Idempotent."""
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self.server.serve_forever, name="scriptscrap-workspace",
+            daemon=True)
+        self._thread.start()
+
     def serve_forever(self) -> None:
+        """Serve on THIS thread, until `shutdown()`. What the CLI uses."""
+        self._thread = threading.current_thread()
         self.server.serve_forever()
 
     def shutdown(self) -> None:
-        self.server.shutdown()
+        """Stop serving and release the socket. Idempotent, and safe on a
+        server that never started.
+
+        `BaseServer.shutdown()` blocks on an event that only `serve_forever`
+        sets, so calling it on a server that was constructed but never served
+        deadlocks -- which is precisely the object the old `serve()` returned.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self._thread is not None:
+            self.server.shutdown()
+            if self._thread is not threading.current_thread():
+                self._thread.join(timeout=5)
+            self._thread = None
         self.server.server_close()
 
 
 def serve(root: Path, *, port: int = 0, open_browser: bool = True) -> Workspace:
-    """Start a workspace and hand back the running server."""
+    """Start a workspace and hand back the RUNNING server."""
     workspace = Workspace(WorkspaceConfig(root=root, port=port))
+    workspace.start()
     if open_browser:
+        # After start(), never before: the browser must not arrive at a socket
+        # that is listening and unserved.
         import webbrowser
         webbrowser.open(workspace.url)
     return workspace

@@ -65,14 +65,14 @@ def test_the_api_serves_the_workflow_joined_to_its_elements(analysed):
     try:
         body = api.workflow(workspace, {})
     finally:
-        workspace.server.server_close()   # F7; becomes shutdown() at D4
+        workspace.shutdown()
 
     assert body["steps"], "no steps served"
     second = Workspace(WorkspaceConfig(root=analysed))
     try:
         element_keys = {e["key"] for e in api.ui_elements(second, {})["ui_elements"]}
     finally:
-        second.server.server_close()      # F7; becomes shutdown() at D4
+        second.shutdown()
     unresolved = [s for s in body["steps"]
                   if s["element_key"] and s["element_key"] not in element_keys]
     assert unresolved == [], f"{len(unresolved)} step(s) do not join"
@@ -83,6 +83,6 @@ def test_the_states_route_resolves_a_transition_to_its_element(analysed):
     try:
         body = api.states(workspace, {})
     finally:
-        workspace.server.server_close()   # F7; becomes shutdown() at D4
+        workspace.shutdown()
     assert body["transitions"]
     assert all("trigger_element_key" in t for t in body["transitions"])

@@ -394,3 +394,70 @@ def test_two_consecutive_launches_are_both_usable(session_root):
 def test_a_wrong_token_with_no_cookie_is_still_rejected(workspace):
     status, _ = request(workspace, "/api/sessions?t=nope")
     assert status == 401
+
+
+# --- lifecycle: serve() serves, shutdown() cannot deadlock (F7) -----------
+
+def test_serve_returns_a_running_server(session_root):
+    """`serve()`'s docstring says 'Start a workspace and hand back the running
+    server'. It never called serve_forever, so connections sat in the accept
+    backlog and the browser it opened hung on a blank page."""
+    from scriptscrap.workspace import serve
+
+    workspace = serve(session_root, port=0, open_browser=False)
+    try:
+        conn = http.client.HTTPConnection(*workspace.address, timeout=3)
+        try:
+            conn.request("GET", f"/api/sessions?t={workspace.token}")
+            assert conn.getresponse().status == 200
+        finally:
+            conn.close()
+    finally:
+        workspace.shutdown()
+
+
+def test_shutdown_returns_on_a_server_that_never_served(session_root):
+    """BaseServer.shutdown() waits on an event only serve_forever() sets, so
+    shutdown() on the object serve() returned blocked forever."""
+    workspace = Workspace(WorkspaceConfig(root=session_root))
+    done = threading.Event()
+    threading.Thread(target=lambda: (workspace.shutdown(), done.set()),
+                     daemon=True).start()
+    assert done.wait(5), "shutdown() blocked on a server that never served"
+
+
+def test_shutdown_is_idempotent(session_root):
+    from scriptscrap.workspace import serve
+
+    workspace = serve(session_root, port=0, open_browser=False)
+    workspace.shutdown()
+    workspace.shutdown()          # must not raise
+
+
+def test_start_is_idempotent(session_root):
+    workspace = Workspace(WorkspaceConfig(root=session_root))
+    try:
+        workspace.start()
+        workspace.start()
+        conn = http.client.HTTPConnection(*workspace.address, timeout=3)
+        try:
+            conn.request("GET", f"/api/sessions?t={workspace.token}")
+            assert conn.getresponse().status == 200
+        finally:
+            conn.close()
+    finally:
+        workspace.shutdown()
+
+
+def test_the_port_is_released_after_shutdown(session_root):
+    from scriptscrap.workspace import serve
+
+    workspace = serve(session_root, port=0, open_browser=False)
+    host, port = workspace.address
+    workspace.shutdown()
+    probe = socket.socket()
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((host, port))          # must not raise
+    finally:
+        probe.close()

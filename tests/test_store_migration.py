@@ -168,12 +168,7 @@ def test_the_workspace_says_the_same_thing(tmp_path):
             api.session_overview(workspace, {})
         assert "analyze" in str(excinfo.value)
     finally:
-        # NOT `workspace.shutdown()`. This Workspace never called
-        # serve_forever, and BaseServer.shutdown() blocks on an event only
-        # serve_forever sets -- the F7 deadlock, which Plan D Task D4 fixes.
-        # Releasing the socket directly is all this test needs, and it does
-        # not make a store test depend on an unfixed defect elsewhere.
-        workspace.server.server_close()
+        workspace.shutdown()
 
 
 # --- retention: one run per session (F13) ---------------------------------
