@@ -5,6 +5,7 @@ import json
 import platform
 import re
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
@@ -446,6 +447,7 @@ class WebHarvester:
         self.endpoints = {}
         self.network_log = []
         self.dom_snapshots = []
+        self._last_form_inventory = None
         self.value_origins = {}
         self.value_dependencies = []
         self.openapi_paths = {}
@@ -1055,6 +1057,26 @@ class WebHarvester:
             },
         )
 
+        inventory = [
+            {"frame_url": r["frame_url"], "forms": r["data"].get("forms", [])}
+            for r in results
+        ]
+        digest = hashlib.sha256(
+            json.dumps(inventory, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        # A scan that found the same structure as the last one is not new
+        # evidence. Emitting it anyway would put 124 copies of one inventory in
+        # the log and make "when did this form appear?" unanswerable by reading.
+        if digest != self._last_form_inventory:
+            self._last_form_inventory = digest
+            self.emit_event(
+                EV.Source.ENGINE,
+                EV.EventType.DOM_FORMS,
+                url=page.url,
+                frames=inventory,
+                inventory_sha256=digest,
+            )
+
     async def _eval_page_world(self, target, expression, *, default=None):
         """Evaluate an expression against the PAGE's globals, not the driver's.
 
@@ -1126,14 +1148,30 @@ class WebHarvester:
         self.mutations = await self._eval_page_world(
             page, "window.domMutations || []", default=[]) or []
 
+        calls_by_function = Counter(
+            h.get("function") for h in self.js_hooks if h.get("function"))
+
         self.emit_event(
             EV.Source.RUNTIME,
             EV.EventType.RUNTIME_HOOKS,
             url=page.url,
             hook_calls=len(self.js_hooks),
-            functions=sorted({h.get("function") for h in self.js_hooks if h.get("function")}),
+            functions=sorted(calls_by_function),
+            # Per call site, not just the set of names. "fetch was patched" and
+            # "fetch was called 312 times" are different observations, and the
+            # second one was thrown away with js_hooks_and_mutations.json.
+            hook_calls_by_function=dict(sorted(calls_by_function.items())),
             dropdown_catalogs=sorted(self.catalogs),
+            # The OPTIONS, not just the select names. What values a field
+            # accepts is the reason a reader opens a dropdown catalogue, and
+            # dropdown_catalogs.json was the only place it lived.
+            dropdown_catalog_options=dict(sorted(self.catalogs.items())),
             jquery_bound_selectors=sorted(self.jquery_events),
+            # Which events, not just which selectors.
+            jquery_bound_events={
+                selector: sorted(events)
+                for selector, events in sorted(self.jquery_events.items())
+            },
             # The legacy MutationObserver's tail, summarised. Incremental
             # mutations now come from the runtime probe as dom_mutation events;
             # this stays folded in here so the two are never confused.

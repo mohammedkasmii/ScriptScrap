@@ -24,6 +24,18 @@ from scriptscrap.analysis.events_index import EventStore, StaleIndexError
 
 SAMPLE = Path(__file__).parent / "golden" / "sample_events.jsonl"
 
+def _fixture_event_count() -> int:
+    """How many events the golden fixture holds.
+
+    Derived, not hard-coded: the fixture is regenerated whenever a sensor
+    change is re-blessed, and a literal here made four unrelated tests fail on
+    every re-bless. What these tests assert is a RELATIONSHIP to the log, not
+    a number.
+    """
+    return sum(1 for line in SAMPLE.read_text(encoding="utf-8").splitlines()
+               if line.strip())
+
+
 
 @pytest.fixture
 def session(tmp_path):
@@ -78,7 +90,7 @@ def test_page_walks_the_whole_log_exactly_once(store):
         if page.next_seq is None:
             break
         cursor = page.next_seq
-    assert len(seen) == len(set(seen)) == 139
+    assert len(seen) == len(set(seen)) == _fixture_event_count()
 
 
 def test_page_filters_by_type(store):
@@ -128,7 +140,7 @@ def test_counts_by_type_matches_the_log(store):
     counts = store.counts_by_type()
     assert counts["user_click"] == 22
     assert counts["http_request"] == 19
-    assert sum(counts.values()) == 139
+    assert sum(counts.values()) == _fixture_event_count()
 
 
 def test_window_returns_an_inclusive_seq_range(store):

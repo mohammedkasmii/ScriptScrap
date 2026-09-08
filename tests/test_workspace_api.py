@@ -24,6 +24,18 @@ from scriptscrap.workspace.server import Workspace, WorkspaceConfig
 
 SAMPLE = Path(__file__).parent / "golden" / "sample_events.jsonl"
 
+def _fixture_event_count() -> int:
+    """How many events the golden fixture holds.
+
+    Derived, not hard-coded: the fixture is regenerated whenever a sensor
+    change is re-blessed, and a literal here made four unrelated tests fail on
+    every re-bless. What these tests assert is a RELATIONSHIP to the log, not
+    a number.
+    """
+    return sum(1 for line in SAMPLE.read_text(encoding="utf-8").splitlines()
+               if line.strip())
+
+
 
 @pytest.fixture(scope="module")
 def workspace(tmp_path_factory):
@@ -44,7 +56,7 @@ def q(**kwargs) -> dict[str, list[str]]:
 def test_sessions_lists_the_open_session(workspace):
     body = api.sessions(workspace, {})
     assert len(body["sessions"]) == 1
-    assert body["sessions"][0]["event_count"] == 139
+    assert body["sessions"][0]["event_count"] == _fixture_event_count()
 
 
 def test_sessions_reports_the_redaction_posture(workspace):

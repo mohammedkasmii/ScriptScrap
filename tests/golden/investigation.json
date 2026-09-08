@@ -1,11 +1,12 @@
 {
   "events.jsonl": {
     "by_source": {
-      "engine": 18,
+      "engine": 22,
       "playwright": 57
     },
     "by_type": {
       "capture_gap": 6,
+      "dom_forms": 4,
       "dom_mutation": "<BATCHED>",
       "dom_snapshot": 4,
       "frame_attached": 2,
@@ -36,16 +37,20 @@
       "engine": [
         "session_start",
         "dom_snapshot",
+        "dom_forms",
         "screenshot",
         "html_snapshot",
         "capture_gap",
         "dom_snapshot",
+        "dom_forms",
         "capture_gap",
         "dom_snapshot",
+        "dom_forms",
         "screenshot",
         "html_snapshot",
         "capture_gap",
         "dom_snapshot",
+        "dom_forms",
         "screenshot",
         "html_snapshot",
         "capture_gap",

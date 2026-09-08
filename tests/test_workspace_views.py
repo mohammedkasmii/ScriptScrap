@@ -22,6 +22,18 @@ from scriptscrap.workspace.server import Workspace, WorkspaceConfig
 
 SAMPLE = Path(__file__).parent / "golden" / "sample_events.jsonl"
 
+def _fixture_event_count() -> int:
+    """How many events the golden fixture holds.
+
+    Derived, not hard-coded: the fixture is regenerated whenever a sensor
+    change is re-blessed, and a literal here made four unrelated tests fail on
+    every re-bless. What these tests assert is a RELATIONSHIP to the log, not
+    a number.
+    """
+    return sum(1 for line in SAMPLE.read_text(encoding="utf-8").splitlines()
+               if line.strip())
+
+
 
 @pytest.fixture(scope="module")
 def workspace(tmp_path_factory):
@@ -63,7 +75,7 @@ def test_timeline_pages_through_the_whole_log_exactly_once(workspace):
         if body["next_seq"] is None:
             break
         cursor = body["next_seq"]
-    assert len(seen) == len(set(seen)) == 139
+    assert len(seen) == len(set(seen)) == _fixture_event_count()
 
 
 def test_timeline_filters_by_type(workspace):

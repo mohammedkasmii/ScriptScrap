@@ -83,6 +83,11 @@ class EventType(StrEnum):
 
     # DOM / artifacts
     DOM_SNAPSHOT = "dom_snapshot"
+    # The structure a DOM scan actually read: forms and their fields, per frame.
+    # dom_snapshot counts them; this names them. Emitted only when the inventory
+    # CHANGES, so a page scanned 124 times contributes one event per distinct
+    # shape rather than 124 copies of one.
+    DOM_FORMS = "dom_forms"
     DOM_MUTATION = "dom_mutation"
     SCREENSHOT = "screenshot"
     HTML_SNAPSHOT = "html_snapshot"
