@@ -243,7 +243,15 @@ def test_shared_export_excludes_source_bodies_and_cookie_values(forensic_session
 
     import json
     payload = json.loads(blob)
-    assert payload["scripts"], "script metadata should still be exported"
-    assert payload["scripts"][0]["sha256"], "the hash is what makes it verifiable"
-    assert "source" not in payload["scripts"][0]
-    assert payload["capture_health"]["overall"]
+    # The script inventory is no longer exported at all. It used to carry the
+    # URL, the declared function names and the URL literals found in the
+    # source -- every one of them read off the application, and three of the
+    # 28 fields the audit found leaking. The hash alone did not justify
+    # shipping the rest, so the whole block is dropped rather than filtered.
+    assert "scripts" not in payload
+    assert "declared_functions" not in blob
+    assert "url_literals" not in blob
+    # Capture health still travels, as codes and counts rather than prose.
+    assert payload["capture_health"]["overall_code"]
+    assert "overall" not in payload["capture_health"], (
+        "the prose verdict is derived, not a constant, so it is not exported")
