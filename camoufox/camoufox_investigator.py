@@ -445,6 +445,11 @@ class WebHarvester:
         self.scope = scope
         self.endpoints = {}
         self._last_form_inventory = None
+        # Pessimistic by default. A session whose teardown raised leaves a
+        # manifest that says so; only reaching the end of a clean run sets
+        # "clean". A session killed hard writes no manifest at all, and the
+        # workspace reports manifest_present: false for that.
+        self.outcome = "failed"
         # A COUNT, not a log. `self.network_log` held every request's headers
         # and body in RAM for the whole session and was written nowhere; the
         # events are the record, and the manifest needs only how many.
@@ -1087,6 +1092,10 @@ class WebHarvester:
             "target_url": self.target_url,
             "started_at": self.started_at.isoformat(),
             "finished_at": datetime.now(UTC).isoformat(),
+            # How the session ended. The repository's own interrupted capture
+            # was distinguishable only by its directory name, which is not
+            # evidence.
+            "outcome": self.outcome,
             "scope": self.scope.as_dict(),
             "environment": {
                 "python": sys.version.split()[0],
@@ -1513,9 +1522,14 @@ async def main():
             
             # Final dump of hidden in-memory state
             await engine.extract_active_introspection(page)
-            
+            engine.outcome = "clean"
+
+    except KeyboardInterrupt:
+        engine.outcome = "interrupted"
+        print("\n⚠️ Session interrupted by the operator")
     except Exception as e:
-        print(f"\n⚠️ Session interrupted: {e}")
+        engine.outcome = "failed"
+        print(f"\n⚠️ Session ended with an error: {e}")
     finally:
         engine.export()
 

@@ -228,6 +228,7 @@
       "Endpoint identity ignores the query string and does not template path parameters.",
       "Runtime stacks are raw observation. No causal relationship between a runtime call and a network request is asserted at capture time."
     ],
+    "outcome": "clean",
     "schema": "scriptscrap/session-manifest/1",
     "scope": {
       "in_scope_roots": [

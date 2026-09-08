@@ -204,6 +204,10 @@ async def run_scripted_investigation(
             # -- 9. final in-page introspection ---------------------------
             await engine.extract_active_introspection(page)
 
+        # Reaching here means the scripted workflow finished. `stop_after_step`
+        # raises before this, so a simulated crash keeps the pessimistic
+        # default and never claims a clean outcome.
+        engine.outcome = "clean"
         engine.export()
         return inv
 

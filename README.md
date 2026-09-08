@@ -79,6 +79,10 @@ gitignored by pattern and carries its own `SECURITY.md`. Read
 configuration, the scope policy and the known blind spots that produced the
 evidence.
 
+Standing limitations that are true of every session — console volume, visual
+trace size, what is read only at exit — are in
+[`docs/known-limitations.md`](docs/known-limitations.md).
+
 ## Forensic mode (optional)
 
 Normal capture uses Playwright sensors plus an in-page runtime probe. **Forensic
