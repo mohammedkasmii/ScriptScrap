@@ -14,6 +14,7 @@ and cannot be reproduced by anyone reading the session offline.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from typing import Any
 
 from ..analysis.events_index import EventStore, StaleIndexError
@@ -65,6 +66,21 @@ def _handle(workspace, query) -> SessionHandle:
     return workspace.session(_one(query, "session"))
 
 
+@contextmanager
+def _read(handle: SessionHandle):
+    """A read-only connection that is always closed.
+
+    `with sqlite3.connect(...) as conn` commits or rolls back; it does not
+    close. Twelve handlers wrote `try/finally: conn.close()` and one did not,
+    which is the shape of a defect waiting for a slower garbage collector.
+    """
+    conn = handle.connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _store(handle: SessionHandle) -> EventStore:
     if handle.log_path is None:
         raise EvidenceUnavailable(
@@ -99,7 +115,7 @@ def sessions(workspace, query) -> dict:
     """Every session this workspace can open."""
     out = []
     for handle in workspace.sessions:
-        with handle.connect() as conn:
+        with _read(handle) as conn:
             row = conn.execute(
                 "SELECT session_id, created_at, event_count, analysis_version "
                 "FROM analysis_runs ORDER BY id DESC LIMIT 1").fetchone()
@@ -118,8 +134,7 @@ def sessions(workspace, query) -> dict:
 def session_overview(workspace, query) -> dict:
     """Counts, health, findings and the conditions of capture."""
     handle = _handle(workspace, query)
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         run = conn.execute(
             "SELECT * FROM analysis_runs WHERE id=?", (run_id,)).fetchone()
@@ -144,8 +159,6 @@ def session_overview(workspace, query) -> dict:
             "SELECT * FROM findings WHERE run_id=? ORDER BY "
             "CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, kind",
             (run_id,))]
-    finally:
-        conn.close()
 
     manifest = handle.manifest()
     by_type: dict[str, int] = {}
@@ -209,15 +222,12 @@ def _endpoint_row(row) -> dict:
 
 def endpoints(workspace, query) -> dict:
     handle = _handle(workspace, query)
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         rows = conn.execute(
             "SELECT * FROM endpoints WHERE run_id=? ORDER BY template, method",
             (run_id,)).fetchall()
         return {"endpoints": [_endpoint_row(r) for r in rows]}
-    finally:
-        conn.close()
 
 
 def endpoint_detail(workspace, query) -> dict:
@@ -227,8 +237,7 @@ def endpoint_detail(workspace, query) -> dict:
     if not key:
         raise BadRequest("endpoint_key is required")
 
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         row = conn.execute(
             "SELECT * FROM endpoints WHERE run_id=? AND endpoint_key=?",
@@ -267,8 +276,6 @@ def endpoint_detail(workspace, query) -> dict:
             "SELECT * FROM dependencies WHERE run_id=? AND "
             "(source_endpoint=? OR target_endpoint=?)", (run_id, key, key))]
         return detail
-    finally:
-        conn.close()
 
 
 def _schema_row(conn, row) -> dict:
@@ -410,8 +417,7 @@ def timeline(workspace, query) -> dict:
 def states(workspace, query) -> dict:
     """Observed application states and the transitions between them."""
     handle = _handle(workspace, query)
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         rows = [{
             "label": r["label"],
@@ -446,8 +452,6 @@ def states(workspace, query) -> dict:
             "SELECT * FROM state_transitions WHERE run_id=? "
             "ORDER BY observation_count DESC", (run_id,))]
         return {"states": rows, "transitions": transitions}
-    finally:
-        conn.close()
 
 
 # --- workflow -------------------------------------------------------------
@@ -459,8 +463,7 @@ def workflow(workspace, query) -> dict:
     here: a view that re-ordered the workflow would be inventing one.
     """
     handle = _handle(workspace, query)
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         return {"steps": [{
             "ordinal": r["ordinal"],
@@ -475,8 +478,6 @@ def workflow(workspace, query) -> dict:
         } for r in conn.execute(
             "SELECT * FROM workflow_steps WHERE run_id=? ORDER BY ordinal",
             (run_id,))]}
-    finally:
-        conn.close()
 
 
 # --- ui elements ----------------------------------------------------------
@@ -488,8 +489,7 @@ def ui_elements(workspace, query) -> dict:
     generated script breaks on, so hiding them would hide the risk.
     """
     handle = _handle(workspace, query)
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         out = []
         for r in conn.execute(
@@ -519,16 +519,13 @@ def ui_elements(workspace, query) -> dict:
                     "ORDER BY stability DESC, strategy", (r["id"],))],
             })
         return {"ui_elements": out}
-    finally:
-        conn.close()
 
 
 # --- schemas --------------------------------------------------------------
 
 def schemas(workspace, query) -> dict:
     handle = _handle(workspace, query)
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         rows = conn.execute(
             "SELECT * FROM schemas WHERE run_id=? ORDER BY endpoint_key, direction, status",
@@ -536,8 +533,6 @@ def schemas(workspace, query) -> dict:
         return {"schemas": [
             {"endpoint_key": r["endpoint_key"], **_schema_row(conn, r)} for r in rows
         ]}
-    finally:
-        conn.close()
 
 
 # --- dependencies ---------------------------------------------------------
@@ -550,8 +545,7 @@ def dependencies(workspace, query) -> dict:
     the endpoints that actually feed each other.
     """
     handle = _handle(workspace, query)
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         edges = [{
             "source_endpoint": d["source_endpoint"],
@@ -577,16 +571,13 @@ def dependencies(workspace, query) -> dict:
         nodes = {name: {"key": name, "observation_count": observed.get(name, 0)}
                  for name in sorted(names)}
         return {"nodes": nodes, "dependencies": edges}
-    finally:
-        conn.close()
 
 
 # --- technology -----------------------------------------------------------
 
 def technologies(workspace, query) -> dict:
     handle = _handle(workspace, query)
-    conn = handle.connect()
-    try:
+    with _read(handle) as conn:
         run_id = _run_id(conn)
         return {"technologies": [{
             "name": r["name"],
@@ -597,8 +588,6 @@ def technologies(workspace, query) -> dict:
         } for r in conn.execute(
             "SELECT * FROM technologies WHERE run_id=? ORDER BY confidence DESC, name",
             (run_id,))]}
-    finally:
-        conn.close()
 
 
 # --- generated starting points --------------------------------------------
