@@ -49,6 +49,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             # would look like data loss.
             print(f"rebuilt {db_path}: it was written by an earlier store schema")
         run_id = store.write(result)
+        if store.replaced:
+            print(f"  replaced {store.replaced} superseded run(s)")
+            # VACUUM reclaims the freed pages; without it the file keeps them
+            # and the size never comes back down. It cannot run inside a
+            # transaction, which is why it is here and not in _prune.
+            store.conn.execute("VACUUM")
 
     analysis_dir = root / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)

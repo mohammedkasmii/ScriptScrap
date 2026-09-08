@@ -250,6 +250,7 @@ class DerivedStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.rebuilt = False
+        self.replaced = 0
 
         found = self._version_on_disk()
         if found > STORE_SCHEMA_VERSION:
@@ -306,8 +307,43 @@ class DerivedStore:
         self.close()
 
     # -- writing -----------------------------------------------------------
-    def write(self, result: AnalysisResult) -> int:
-        """Persist one analysis run. Returns its run id."""
+    def _prune(self, session_id: str, keep: int) -> int:
+        """Drop superseded runs for one session. Returns how many were removed.
+
+        Child tables hang off `endpoints.id`, `schemas.id` and `ui_elements.id`
+        rather than off `run_id`, so they are deleted through their parents --
+        SQLite does not enforce the REFERENCES clauses without
+        `PRAGMA foreign_keys`, and turning that on mid-life would change the
+        behaviour of every existing store.
+        """
+        stale = [int(r["id"]) for r in self.conn.execute(
+            "SELECT id FROM analysis_runs WHERE session_id = ? "
+            "ORDER BY id DESC LIMIT -1 OFFSET ?", (session_id, keep))]
+        if not stale:
+            return 0
+        marks = ",".join("?" * len(stale))
+        cur = self.conn.cursor()
+        cur.execute(f"DELETE FROM endpoint_params WHERE endpoint_id IN "  # noqa: S608
+                    f"(SELECT id FROM endpoints WHERE run_id IN ({marks}))", stale)
+        cur.execute(f"DELETE FROM schema_fields WHERE schema_id IN "      # noqa: S608
+                    f"(SELECT id FROM schemas WHERE run_id IN ({marks}))", stale)
+        cur.execute(f"DELETE FROM selectors WHERE element_id IN "         # noqa: S608
+                    f"(SELECT id FROM ui_elements WHERE run_id IN ({marks}))", stale)
+        for table in ("events", "endpoints", "schemas", "dependencies",
+                      "ui_elements", "states", "state_transitions",
+                      "technologies", "findings"):
+            cur.execute(f"DELETE FROM {table} WHERE run_id IN ({marks})", stale)  # noqa: S608
+        cur.execute(f"DELETE FROM analysis_runs WHERE id IN ({marks})", stale)  # noqa: S608
+        return len(stale)
+
+    def write(self, result: AnalysisResult, *, keep: int = 1) -> int:
+        """Persist one analysis run, superseding older ones for this session.
+
+        `keep=1` is the contract: nothing reads an older run -- both readers
+        select the newest at the current ANALYSIS_VERSION -- and a retained one
+        is a claim about the past that nothing verifies, since the log it was
+        derived from may since have grown.
+        """
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO analysis_runs (session_id, created_at, analysis_version,"
@@ -440,6 +476,7 @@ class DerivedStore:
                  _dumps(finding.evidence.event_ids)),
             )
 
+        self.replaced = self._prune(result.session_id, keep)
         self.conn.commit()
         return run_id
 

@@ -174,3 +174,67 @@ def test_the_workspace_says_the_same_thing(tmp_path):
         # Releasing the socket directly is all this test needs, and it does
         # not make a store test depend on an unfixed defect elsewhere.
         workspace.server.server_close()
+
+
+# --- retention: one run per session (F13) ---------------------------------
+
+def test_analyzing_three_times_leaves_one_run(tmp_path):
+    """Each run appended a full duplicate of the events index: ~2 MB a time."""
+    root = tmp_path / "repeat"
+    root.mkdir()
+    shutil.copy(SAMPLE, root / "events.jsonl")
+
+    sizes = []
+    for _ in range(3):
+        assert _analyze(root) == 0
+        sizes.append((root / "session.sqlite").stat().st_size)
+
+    conn = sqlite3.connect(root / "session.sqlite")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
+        run_id = conn.execute("SELECT id FROM analysis_runs").fetchone()[0]
+        events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        orphans = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id != ?", (run_id,)).fetchone()[0]
+        assert orphans == 0
+        for table in ("endpoints", "schemas", "dependencies", "ui_elements",
+                      "states", "state_transitions", "technologies", "findings"):
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE run_id != ?",  # noqa: S608
+                (run_id,)).fetchone()[0] == 0, f"{table} kept an orphan run"
+        assert events > 0
+    finally:
+        conn.close()
+
+    # F13 is about growth PER RUN, so the assertion is on the steady state.
+    # Run 1 never vacuums -- there is nothing to prune yet -- so run 2 settles
+    # the page layout and can differ from it by a page either way. On this
+    # 135 KB fixture one page is 6%; on the real 9,255-event capture the same
+    # sequence measures 1.88 / 1.83 / 1.84 / 1.86 MB against a pre-fix
+    # 1.97 / 3.90 / 5.84.
+    assert sizes[2] <= sizes[1] * 1.05, f"the store grew per run: {sizes}"
+    assert sizes[2] < sizes[0] * 2, (
+        f"the store is duplicating the events index: {sizes}")
+
+
+def test_child_rows_of_a_replaced_run_are_deleted(tmp_path):
+    """endpoint_params, schema_fields and selectors hang off ids, not run_id."""
+    root = tmp_path / "children"
+    root.mkdir()
+    shutil.copy(SAMPLE, root / "events.jsonl")
+    for _ in range(2):
+        _analyze(root)
+
+    conn = sqlite3.connect(root / "session.sqlite")
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM endpoint_params WHERE endpoint_id NOT IN "
+            "(SELECT id FROM endpoints)").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM schema_fields WHERE schema_id NOT IN "
+            "(SELECT id FROM schemas)").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM selectors WHERE element_id NOT IN "
+            "(SELECT id FROM ui_elements)").fetchone()[0] == 0
+    finally:
+        conn.close()
