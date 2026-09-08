@@ -44,6 +44,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if args.rebuild and db_path.exists():
         db_path.unlink()
     with DerivedStore(db_path) as store:
+        if store.rebuilt:
+            # Never silent. A store that vanished without a line of output
+            # would look like data loss.
+            print(f"rebuilt {db_path}: it was written by an earlier store schema")
         run_id = store.write(result)
 
     analysis_dir = root / "analysis"

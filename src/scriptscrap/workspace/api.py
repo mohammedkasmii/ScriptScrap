@@ -66,9 +66,21 @@ def _store(handle: SessionHandle) -> EventStore:
 
 
 def _run_id(conn) -> int:
-    row = conn.execute("SELECT id FROM analysis_runs ORDER BY id DESC LIMIT 1").fetchone()
+    """The newest run at THIS build's ANALYSIS_VERSION.
+
+    A run from an older version is ignored rather than served: it is a set of
+    conclusions the current code would not draw, and a view that rendered it
+    would be citing live evidence for stale inference.
+    """
+    from ..analysis.models import ANALYSIS_VERSION
+
+    row = conn.execute(
+        "SELECT id FROM analysis_runs WHERE analysis_version = ? "
+        "ORDER BY id DESC LIMIT 1", (ANALYSIS_VERSION,)).fetchone()
     if row is None:
-        raise NotFound("this session has no analysis run; run `scriptscrap analyze`")
+        raise NotFound(
+            f"this session has no analysis run at version {ANALYSIS_VERSION}; "
+            "run `scriptscrap analyze`")
     return int(row["id"])
 
 

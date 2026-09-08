@@ -93,11 +93,21 @@ class EventStore:
 
     # -- run selection -----------------------------------------------------
     def _latest_run(self) -> int:
+        """The newest run THIS build's inference would have produced.
+
+        Filtered by version: a run written by an older ANALYSIS_VERSION is a
+        conclusion the current code would not draw, and serving it as current
+        would put stale inference behind a live evidence link.
+        """
+        from .models import ANALYSIS_VERSION
+
         row = self.conn.execute(
-            "SELECT id FROM analysis_runs ORDER BY id DESC LIMIT 1").fetchone()
+            "SELECT id FROM analysis_runs WHERE analysis_version = ? "
+            "ORDER BY id DESC LIMIT 1", (ANALYSIS_VERSION,)).fetchone()
         if row is None:
             raise StaleIndexError(
-                f"{self.db_path} holds no analysis run; run `scriptscrap analyze`")
+                f"{self.db_path} holds no analysis run at version "
+                f"{ANALYSIS_VERSION}; run `scriptscrap analyze` to produce one")
         return int(row["id"])
 
     # -- staleness ---------------------------------------------------------

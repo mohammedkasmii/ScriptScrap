@@ -1,0 +1,176 @@
+"""A store written by an older ScriptScrap must not be a dead end.
+
+`analyze` against any session captured before the events index existed died
+with `sqlite3.OperationalError: table analysis_runs has no column named
+log_size` -- an unhandled traceback, no message, and no mention of --rebuild.
+All three real captures in this repository were affected.
+"""
+
+from __future__ import annotations
+
+import shutil
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from scriptscrap.analysis import analyze_log
+from scriptscrap.analysis.store import (
+    STORE_SCHEMA_VERSION,
+    DerivedStore,
+    StoreSchemaError,
+)
+from scriptscrap.cli import build_parser
+
+SAMPLE = Path(__file__).parent / "golden" / "sample_events.jsonl"
+
+# The exact shape of a pre-Phase-2 store: no log fingerprint, no events table.
+LEGACY_SCHEMA = """
+CREATE TABLE analysis_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       TEXT    NOT NULL,
+    created_at       TEXT    NOT NULL,
+    analysis_version INTEGER NOT NULL,
+    event_count      INTEGER NOT NULL
+);
+CREATE TABLE endpoints (id INTEGER PRIMARY KEY, run_id INTEGER);
+"""
+
+
+def _legacy_session(tmp_path: Path) -> Path:
+    root = tmp_path / "legacy"
+    root.mkdir()
+    shutil.copy(SAMPLE, root / "events.jsonl")
+    conn = sqlite3.connect(root / "session.sqlite")
+    conn.executescript(LEGACY_SCHEMA)
+    conn.execute("INSERT INTO analysis_runs (session_id, created_at, "
+                 "analysis_version, event_count) VALUES ('old', 'then', 1, 5)")
+    conn.commit()
+    conn.close()
+    return root
+
+
+def _analyze(root: Path) -> int:
+    args = build_parser().parse_args(["analyze", str(root)])
+    return args.func(args)
+
+
+def test_analyze_over_a_pre_phase_2_store_succeeds(tmp_path, capsys):
+    root = _legacy_session(tmp_path)
+    assert _analyze(root) == 0
+    assert "rebuilt" in capsys.readouterr().out.lower()
+
+
+def test_the_rebuilt_store_holds_the_new_tables(tmp_path):
+    root = _legacy_session(tmp_path)
+    _analyze(root)
+    conn = sqlite3.connect(root / "session.sqlite")
+    try:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(analysis_runs)")}
+        assert {"log_size", "log_sha256"} <= columns
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] > 0
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == STORE_SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_a_legacy_store_is_reported_not_silently_replaced(tmp_path):
+    """`on_mismatch="raise"` exists so a caller can refuse."""
+    root = _legacy_session(tmp_path)
+    with pytest.raises(StoreSchemaError) as excinfo:
+        DerivedStore(root / "session.sqlite", on_mismatch="raise")
+    assert "rebuild" in str(excinfo.value)
+
+
+def test_a_store_from_the_future_is_never_discarded(tmp_path):
+    root = tmp_path / "future"
+    root.mkdir()
+    conn = sqlite3.connect(root / "session.sqlite")
+    conn.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION + 1}")
+    conn.execute("CREATE TABLE precious (x)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(StoreSchemaError) as excinfo:
+        DerivedStore(root / "session.sqlite")
+    assert "newer" in str(excinfo.value).lower()
+
+    conn = sqlite3.connect(root / "session.sqlite")
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='precious'"
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_a_fresh_store_is_stamped(tmp_path):
+    with DerivedStore(tmp_path / "session.sqlite") as store:
+        assert store.rebuilt is False
+    conn = sqlite3.connect(tmp_path / "session.sqlite")
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == STORE_SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_a_current_store_is_not_rebuilt(tmp_path):
+    path = tmp_path / "session.sqlite"
+    shutil.copy(SAMPLE, tmp_path / "events.jsonl")
+    with DerivedStore(path) as store:
+        store.write(analyze_log(tmp_path / "events.jsonl"))
+    with DerivedStore(path) as store:
+        assert store.rebuilt is False
+
+
+# --- readers ignore a run from another analysis version -------------------
+
+def test_a_reader_ignores_a_run_from_another_analysis_version(tmp_path):
+    """A stored run the current code would not produce is not evidence."""
+    from scriptscrap.analysis.events_index import EventStore, StaleIndexError
+    from scriptscrap.analysis.models import ANALYSIS_VERSION
+
+    root = tmp_path / "s"
+    root.mkdir()
+    shutil.copy(SAMPLE, root / "events.jsonl")
+    with DerivedStore(root / "session.sqlite") as store:
+        store.write(analyze_log(root / "events.jsonl"))
+
+    conn = sqlite3.connect(root / "session.sqlite")
+    conn.execute("UPDATE analysis_runs SET analysis_version = ?",
+                 (ANALYSIS_VERSION - 1,))
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(StaleIndexError) as excinfo:
+        EventStore(root / "session.sqlite", root / "events.jsonl")
+    assert "analyze" in str(excinfo.value)
+
+
+def test_the_workspace_says_the_same_thing(tmp_path):
+    from scriptscrap.analysis.models import ANALYSIS_VERSION
+    from scriptscrap.workspace import Workspace, WorkspaceConfig, api
+
+    root = tmp_path / "s2"
+    root.mkdir()
+    shutil.copy(SAMPLE, root / "events.jsonl")
+    with DerivedStore(root / "session.sqlite") as store:
+        store.write(analyze_log(root / "events.jsonl"))
+    conn = sqlite3.connect(root / "session.sqlite")
+    conn.execute("UPDATE analysis_runs SET analysis_version = ?",
+                 (ANALYSIS_VERSION - 1,))
+    conn.commit()
+    conn.close()
+
+    workspace = Workspace(WorkspaceConfig(root=root))
+    try:
+        with pytest.raises(api.NotFound) as excinfo:
+            api.session_overview(workspace, {})
+        assert "analyze" in str(excinfo.value)
+    finally:
+        # NOT `workspace.shutdown()`. This Workspace never called
+        # serve_forever, and BaseServer.shutdown() blocks on an event only
+        # serve_forever sets -- the F7 deadlock, which Plan D Task D4 fixes.
+        # Releasing the socket directly is all this test needs, and it does
+        # not make a store test depend on an unfixed defect elsewhere.
+        workspace.server.server_close()
