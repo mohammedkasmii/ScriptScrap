@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..events import Event
+from .dbpath import read_only_uri
 from .models import EventIndexRow
 
 # Filtering and counting are answered from sqlite; only these need the log.
@@ -76,7 +77,7 @@ class EventStore:
                  run_id: int | None = None) -> None:
         self.db_path = Path(db_path)
         self.log_path = Path(log_path)
-        self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        self.conn = sqlite3.connect(read_only_uri(self.db_path), uri=True)
         self.conn.row_factory = sqlite3.Row
         self.run_id = run_id if run_id is not None else self._latest_run()
         self._verified = False

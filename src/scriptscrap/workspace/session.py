@@ -59,8 +59,14 @@ class SessionHandle:
         Read-only at the driver level, not by convention: the workspace has no
         write path, and opening the file writable would make that a promise
         rather than a property.
+
+        The path goes through `read_only_uri` because a URI is not a path: a
+        session directory named `acme-#2` is legal everywhere, and pasting it
+        into `file:{path}?mode=ro` starts a URI fragment.
         """
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        from ..analysis.dbpath import read_only_uri
+
+        conn = sqlite3.connect(read_only_uri(self.db_path), uri=True)
         conn.row_factory = sqlite3.Row
         return conn
 
