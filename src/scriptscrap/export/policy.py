@@ -564,6 +564,11 @@ POLICY: dict[tuple[str, str], Disposition] = {
     # reader consults the local session; a sanitised segment view is future
     # work, and DROP is the safe default until each of its fields is classified.
     ("AnalysisResult", "segments"): Disposition.DROP,
+    # The form catalog carries labels, option text and final values -- the
+    # application's own content and, for a text field, whatever the operator
+    # typed. It is dropped from a shareable export and read from the local
+    # session; a sanitised catalog is future work.
+    ("AnalysisResult", "forms"): Disposition.DROP,
     # NOT counts. Verified against the real capture: capture_health holds
     # `overall: "PARTIAL / HIGH COVERAGE"`, eight `sensors[].reasons` strings
     # and two `notes` strings, all with whitespace. A COUNTS disposition would

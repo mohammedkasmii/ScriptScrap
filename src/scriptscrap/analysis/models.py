@@ -364,6 +364,10 @@ class AnalysisResult:
     # workflow and event log stay intact beside this. Empty when no user action
     # was recorded.
     segments: list[Any] = field(default_factory=list)
+    # A catalog of the forms the operator used: their controls, final values,
+    # option choices, the submit and the request/outcome it produced. Empty
+    # when no form was touched.
+    forms: list[Any] = field(default_factory=list)
     health: dict[str, Any] | None = None
     scripts: list[dict[str, Any]] = field(default_factory=list)
     # Credential-bearing header NAMES the application sent, and how often.

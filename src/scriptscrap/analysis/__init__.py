@@ -13,6 +13,7 @@ Everything produced here is DERIVED KNOWLEDGE: an inference carrying the
 
 from .correlation import CorrelationAnalyzer, field_name_similarity, normalize_field_tokens
 from .endpoints import EndpointAnalyzer
+from .forms import FormCatalogAnalyzer, FormCatalogEntry, FormControl
 from .models import (
     ANALYSIS_VERSION,
     AnalysisResult,
@@ -49,6 +50,9 @@ __all__ = [
     "EndpointAnalyzer",
     "Evidence",
     "Finding",
+    "FormCatalogAnalyzer",
+    "FormCatalogEntry",
+    "FormControl",
     "LocatorCandidate",
     "ParamObservation",
     "Schema",

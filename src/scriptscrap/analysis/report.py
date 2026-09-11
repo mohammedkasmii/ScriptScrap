@@ -186,6 +186,32 @@ def render(result: AnalysisResult) -> str:
              for t in result.transitions],
         )
 
+    # -- forms -------------------------------------------------------------
+    if result.forms:
+        lines += ["## Forms and controls", "",
+                  "Each form the operator used, assembled from every observation "
+                  "of it: the controls and their final values, the submit, and "
+                  "the request and outcome it produced. A secret field records "
+                  "that something was entered, never the value.", ""]
+        for form in result.forms:
+            title = f"`{form.form_id or form.form_key}`"
+            if form.method or form.action:
+                title += f" — {form.method or ''} `{form.action or ''}`"
+            lines += [f"### {title}", ""]
+            lines += _table(
+                ["Control", "Tag", "Type", "Label", "Final value", "State"],
+                [[c.name, c.tag, c.type or "—", c.label or "—",
+                  ("(secret)" if c.secret else (c.selected_label or c.final_value or "—")),
+                  ("checked" if c.checked else "unchecked") if c.checked is not None else "—"]
+                 for c in form.controls])
+            if form.associated_request:
+                req = form.associated_request
+                lines.append(f"- request: `{req.get('method')} {req.get('path')}`")
+            if form.outcome:
+                lines.append(f"- outcome: {form.outcome.get('kind')} "
+                             f"`{form.outcome.get('route') or form.outcome.get('status') or ''}`")
+            lines.append("")
+
     # -- inferred activities ----------------------------------------------
     if result.segments:
         lines += ["## Inferred activities", "",

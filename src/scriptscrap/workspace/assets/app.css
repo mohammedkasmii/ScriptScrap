@@ -322,7 +322,8 @@ details[open] > summary::before { content: "▾"; }
    each drill-through; this hides the affordances that would only 409. */
 body.no-evidence .timeline-link,
 body.no-evidence [data-view="timeline"],
-body.no-evidence [data-view="activities"] {
+body.no-evidence [data-view="activities"],
+body.no-evidence [data-view="forms"] {
   display: none;
 }
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from ..events import Event, EventLogReader, EventType
 from .correlation import CorrelationAnalyzer
 from .endpoints import EndpointAnalyzer, endpoint_key_for_request
+from .forms import FormCatalogAnalyzer
 from .health import HealthAnalyzer
 from .models import (
     ANALYSIS_VERSION,
@@ -57,6 +58,9 @@ def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
     # A long session, split into probable business activities. The ordered
     # workflow above is untouched: this is an interpretation laid over it.
     result.segments = SegmentationAnalyzer().analyze(events)
+    # The forms the operator used, assembled from the scattered observations
+    # of each one into a single per-form record.
+    result.forms = FormCatalogAnalyzer().analyze(events)
     # Forensic evidence, when present. A normal session yields empty lists and
     # a health report built from the sensors that did run -- analysis must
     # never require the extension.

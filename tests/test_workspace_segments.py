@@ -80,3 +80,18 @@ def test_a_sanitised_export_has_no_activities_to_serve(tmp_path):
 
 def test_segments_is_a_registered_route():
     assert "segments" in api.ROUTES
+
+
+def test_forms_route_returns_the_form_catalog(workspace):
+    body = api.forms(workspace, q())
+    assert "forms" in body
+    for form in body["forms"]:
+        assert "controls" in form and "evidence_ids" in form
+        # A secret control never carries a value through the API.
+        for control in form["controls"]:
+            if control["secret"]:
+                assert control["final_value"] is None
+
+
+def test_forms_is_a_registered_route():
+    assert "forms" in api.ROUTES

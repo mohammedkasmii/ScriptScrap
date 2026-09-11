@@ -513,6 +513,45 @@ def segments(workspace, query) -> dict:
     } for s in result.segments]}
 
 
+# --- forms ----------------------------------------------------------------
+
+def forms(workspace, query) -> dict:
+    """The forms the operator used, with their controls and outcomes.
+
+    Re-derived per session and memoised on the log's identity, like the
+    activities view. A sanitised export has no log, so `_analysis_for` raises
+    EvidenceUnavailable (409) rather than serving an empty panel.
+    """
+    handle = _handle(workspace, query)
+    result = _analysis_for(handle)
+    return {"forms": [{
+        "form_id": f.form_id,
+        "form_key": f.form_key,
+        "frame_id": f.frame_id,
+        "action": f.action,
+        "method": f.method,
+        "submitted": f.submitted,
+        "associated_request": f.associated_request,
+        "outcome": f.outcome,
+        "controls": [{
+            "name": c.name,
+            "tag": c.tag,
+            "type": c.type,
+            "label": c.label,
+            "placeholder": c.placeholder,
+            "required": c.required,
+            "disabled": c.disabled,
+            "readonly": c.readonly,
+            "checked": c.checked,
+            "selected_label": c.selected_label,
+            "options": c.options,
+            "final_value": c.final_value,
+            "secret": c.secret,
+        } for c in f.controls],
+        "evidence_ids": f.evidence.event_ids,
+    } for f in result.forms]}
+
+
 # --- workflow -------------------------------------------------------------
 
 def workflow(workspace, query) -> dict:
@@ -693,6 +732,7 @@ ROUTES = {
     "sessions": sessions,
     "generate": generate,
     "segments": segments,
+    "forms": forms,
     "session": session_overview,
     "endpoints": endpoints,
     "endpoint": endpoint_detail,
