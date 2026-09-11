@@ -211,7 +211,8 @@ _JSON_TYPES = frozenset({
 })
 # The strategies SelectorAnalyzer can produce.
 _LOCATOR_STRATEGIES = frozenset({
-    "role_name", "label", "name", "id", "text", "structural", "css",
+    "test_id", "role_name", "label", "placeholder", "name", "id", "text",
+    "structural", "css",
 })
 # The elements a capture can record an interaction on. Author-controlled
 # markup can name anything; only these leave.

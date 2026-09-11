@@ -199,8 +199,12 @@ class UIElement:
         """
         if not self.locators:
             return None
-        order = {"role_name": 0, "label": 1, "name": 2, "text": 3,
-                 "id": 4, "css": 5, "structural": 6, "xpath": 7}
+        # The ranking the mission asks for: a test id first, then computed role
+        # plus accessible name, then label, placeholder, name, a stable id,
+        # stable CSS, and finally a structural fallback.
+        order = {"test_id": 0, "role_name": 1, "label": 2, "placeholder": 3,
+                 "name": 4, "text": 5, "id": 6, "css": 7, "structural": 8,
+                 "xpath": 9}
         usable = [loc for loc in self.locators if not loc.warning]
         pool = usable or self.locators
         return sorted(pool, key=lambda locator: (-locator.stability,

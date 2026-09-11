@@ -225,6 +225,8 @@ def _locator_call(element: UIElement) -> tuple[str, str | None]:
         call = f"page.get_by_role({value})"
     elif best.strategy in {"label", "aria_label"}:
         call = f"page.get_by_label({value})"
+    elif best.strategy == "placeholder":
+        call = f"page.get_by_placeholder({value})"
     elif best.strategy == "text":
         call = f"page.get_by_text({value})"
     else:
