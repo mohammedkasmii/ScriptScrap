@@ -61,6 +61,30 @@ def radio_change(name, value, label, *, page, frame, form="f", origin=None):
               page=page, frame=frame, origin=origin)
 
 
+def cb_field(cid, name, value, path, label=None, checked=False):
+    return {"tag": "input", "type": "checkbox", "id": cid, "name": name,
+            "value": value, "path": path, "label": label, "checked": checked}
+
+
+def checkbox_change(name, value, checked, *, cid=None, dom_path=None, label=None,
+                    form="f", page, frame, origin=None):
+    return ev(EventType.USER_CHANGE,
+              {"value": {"checked": checked, "value": value},
+               "element": {"tag": "input", "type": "checkbox", "id": cid,
+                           "name": name, "label": label, "dom_path": dom_path,
+                           "form": form}},
+              page=page, frame=frame, origin=origin)
+
+
+def runtime_submit(form_id, *, page, frame, via="submit", form_path=None,
+                   action="/api/x", method="POST", frame_url="http://h/",
+                   origin=None):
+    return ev(EventType.RUNTIME_FORM_SUBMIT,
+              {"via": via, "action": action, "method": method, "form": form_id,
+               "form_path": form_path},
+              page=page, frame=frame, frame_url=frame_url, origin=origin)
+
+
 def request(path, *, page, frame, method="POST"):
     return ev(EventType.HTTP_REQUEST,
               {"method": method, "url": f"http://h{path}", "path": path,
@@ -440,6 +464,144 @@ def test_radio_group_reflects_the_last_selected_option_over_time():
     assert {o["value"] for o in grp.options} == {"basic", "pro"}
     # Exactly one option is marked selected at the end.
     assert [o["value"] for o in grp.options if o.get("checked")] == ["pro"]
+
+
+# --- duplicate checkbox identity -----------------------------------------
+
+def test_checkboxes_same_name_and_on_value_different_ids_stay_distinct():
+    """Two checkboxes sharing name AND the implicit "on" value are distinct
+    elements; their ids keep them apart."""
+    _reset()
+    forms = _catalog([dom_forms([
+        {"index": 0, "id": "f", "path": "body > form", "action": "/x",
+         "method": "POST", "fields": [
+            cb_field("box-a", "opt", "on", "body > form > input#box-a", "Alpha"),
+            cb_field("box-b", "opt", "on", "body > form > input#box-b", "Beta"),
+        ]}], page="p1", frame="f1", origin=1)])
+    boxes = [c for c in forms[0].controls if c.type == "checkbox"]
+    assert len(boxes) == 2, [(c.name, c.option_value, c.label) for c in boxes]
+    assert {c.label for c in boxes} == {"Alpha", "Beta"}
+
+
+def test_idless_checkboxes_same_name_value_different_paths_stay_distinct():
+    """No ids and the same name/value: the structural DOM path keeps them
+    distinct."""
+    _reset()
+    pa = "body > form > label:nth-of-type(1) > input"
+    pb = "body > form > label:nth-of-type(2) > input"
+    forms = _catalog([dom_forms([
+        {"index": 0, "id": "f", "path": "body > form", "action": "/x",
+         "method": "POST", "fields": [
+            cb_field(None, "opt", "on", pa, "Alpha"),
+            cb_field(None, "opt", "on", pb, "Beta"),
+        ]}], page="p1", frame="f1", origin=1)])
+    boxes = [c for c in forms[0].controls if c.type == "checkbox"]
+    assert len(boxes) == 2, [(c.name, c.option_value, c.label) for c in boxes]
+
+
+def test_checkbox_live_checked_change_merges_into_the_right_choice():
+    """A change event resolves to the SAME checkbox its inventory created, so a
+    live toggle lands on the right choice and does not spawn a duplicate."""
+    _reset()
+    pa = "body > form > label:nth-of-type(1) > input"
+    pb = "body > form > label:nth-of-type(2) > input"
+    forms = _catalog([
+        dom_forms([{"index": 0, "id": "f", "path": "body > form", "action": "/x",
+                    "method": "POST", "fields": [
+            cb_field(None, "opt", "on", pa, "Alpha", checked=False),
+            cb_field(None, "opt", "on", pb, "Beta", checked=False),
+        ]}], page="p1", frame="f1", origin=1),
+        checkbox_change("opt", "on", True, dom_path=pa, page="p1", frame="f1",
+                        origin=1),
+    ])
+    boxes = {c.label: c for c in forms[0].controls if c.type == "checkbox"}
+    assert len(boxes) == 2
+    assert boxes["Alpha"].checked is True
+    assert boxes["Beta"].checked is False
+
+
+def test_a_single_idless_checkbox_stays_one_control():
+    """Preserve single-checkbox behaviour when there is no id."""
+    _reset()
+    forms = _catalog([dom_forms([
+        {"index": 0, "id": "f", "path": "body > form", "action": "/x",
+         "method": "POST", "fields": [
+            cb_field(None, "agree", "on", "body > form > input", "I agree",
+                     checked=True),
+        ]}], page="p1", frame="f1", origin=1)])
+    boxes = [c for c in forms[0].controls if c.type == "checkbox"]
+    assert len(boxes) == 1
+    assert boxes[0].checked is True
+
+
+# --- anonymous programmatic form submission ------------------------------
+
+def test_anonymous_programmatic_submit_merges_with_inventory():
+    """A form.submit() on an anonymous form carries the form's structural path,
+    so it merges with the same entry the DOM inventory and inputs built."""
+    _reset()
+    path = "html > body > form"
+    forms = _catalog([
+        dom_forms([{"index": 0, "id": None, "path": path, "action": "/x",
+                    "method": "POST", "fields": [
+            {"tag": "input", "type": "text", "id": None, "name": "memo",
+             "path": path + " > input"}]}],
+                  page="p1", frame="f1", frame_url="http://h/wiz", origin=1),
+        ev(EventType.USER_INPUT,
+           {"value": {"value": "typed"},
+            "element": {"tag": "input", "name": "memo", "form": "(unnamed)",
+                        "form_path": path}},
+           page="p1", frame="f1", frame_url="http://h/wiz", origin=1),
+        runtime_submit(None, page="p1", frame="f1", form_path=path,
+                       frame_url="http://h/wiz", origin=1),
+    ])
+    assert len(forms) == 1, [f.form_key for f in forms]
+    assert forms[0].submitted is True
+    memo = next(c for c in forms[0].controls if c.name == "memo")
+    assert memo.final_value == "typed"
+
+
+def test_requestsubmit_native_and_wrapper_are_not_double_counted():
+    """requestSubmit() fires a native submit event AND the wrapper observation.
+    Only one is counted -- the native event, which also carries the fields."""
+    _reset()
+    us = submit("order", page="p1", frame="f1")
+    rs = runtime_submit("order", page="p1", frame="f1", via="requestSubmit")
+    forms = _catalog([us, rs])
+    assert len(forms) == 1
+    entry = forms[0]
+    assert entry.submitted is True
+    # The requestSubmit wrapper event was not separately merged.
+    assert rs.event_id not in entry.evidence.event_ids
+
+
+# --- exact SPA occurrence identity ---------------------------------------
+
+def test_two_exact_spa_locations_of_a_same_id_form_do_not_merge():
+    """/claims/123 and /claims/456 are the same structural shape but different
+    records; in one SPA document (one time origin) they must stay separate."""
+    _reset()
+    forms = _catalog([
+        dom_forms([_named_form("entity-form")], page="p1", frame="f1",
+                  frame_url="http://h/claims/123", origin=1000),
+        dom_forms([_named_form("entity-form")], page="p1", frame="f1",
+                  frame_url="http://h/claims/456", origin=1000),
+    ])
+    assert len(forms) == 2, [f.form_key for f in forms]
+    # Structural shape is shared; the exact route separates them.
+    assert {f.route for f in forms} == {"/claims/{id}"}
+    assert {f.exact_route for f in forms} == {"/claims/123", "/claims/456"}
+
+
+def test_repeated_observations_at_one_exact_spa_location_merge():
+    _reset()
+    forms = _catalog([
+        dom_forms([_named_form("entity-form")], page="p1", frame="f1",
+                  frame_url="http://h/claims/123", origin=1000),
+        dom_forms([_named_form("entity-form")], page="p1", frame="f1",
+                  frame_url="http://h/claims/123", origin=1000),
+    ])
+    assert len(forms) == 1, [f.form_key for f in forms]
 
 
 def test_outcome_is_left_uncorrelated_when_identity_is_insufficient():

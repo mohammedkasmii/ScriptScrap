@@ -150,25 +150,52 @@ believed to work but is not proven in CI.
 ### Form identity is by occurrence, which depends on the route being observable
 
 A form entry is one OCCURRENCE, keyed by page, frame, document instance and
-route as well as the form's own identity (its id/name, or -- anonymous -- its
-structural path). The document instance is `performance.timeOrigin`, stamped on
-every DOM scan and every runtime event and renewed on each full navigation, so a
-frame that navigates (its id survives) still yields separate forms per document.
-An SPA route change is *not* a new document, so the route -- `route_shape` of the
-frame URL -- separates two same-id forms shown at different SPA routes.
+**exact** route as well as the form's own identity (its id/name, or -- anonymous
+-- its structural path). The document instance is `performance.timeOrigin`,
+stamped on every DOM scan and every runtime event and renewed on each full
+navigation, so a frame that navigates (its id survives) still yields separate
+forms per document.
+
+**Exact route vs structural route shape.** Two things are recorded, and they are
+not the same:
+
+* `exact_route` -- the path, query and fragment verbatim (`/claims/456`) -- is
+  the occurrence identity. It is what keeps `/claims/123` and `/claims/456`, two
+  records shown by one SPA document (one time origin), from merging.
+* `route` -- the structural `route_shape` (`/claims/{id}`, identifier-looking
+  segments templated) -- is for reporting and state analysis, NOT identity.
+  Keying by it would merge every record behind one shape.
 
 The one honest dependency: an SPA that changes what a form *is* without changing
-the URL or fragment at all (route held purely in JavaScript state) presents two
-occurrences the capture cannot tell apart, because nothing observable
-distinguishes them; they share a key. Every router that reflects its route in
-the path or fragment -- the common case -- is separated correctly.
+the path, query or fragment at all (route held purely in JavaScript state)
+presents two occurrences the capture cannot tell apart, because nothing
+observable distinguishes them; they share a key. Every router that reflects its
+location in the URL -- the common case -- is separated correctly.
 
 Anonymous forms are attributed precisely, not coarsely: the DOM inventory, each
-`input`/`change`, and the submit all carry the owning form's structural path
-(the same `domPath` on both the scanner and the probe), so they resolve to one
-entry and the typed value lands on the right form. Two anonymous forms in one
-document have distinct paths and stay separate. This is proven end to end
-through the production runner in `tests/test_forms_capture_identity.py`.
+`input`/`change`, and the submit -- native OR a programmatic `form.submit()`,
+which carries the form's `form_path` -- all resolve to one entry via the form's
+structural path (the same `domPath` on the scanner and the probe), so the typed
+value lands on the right form. Two anonymous forms in one document have distinct
+paths and stay separate.
+
+**Duplicate checkboxes.** Two checkboxes can share a name and even a value (the
+implicit `on`). A checkbox control is keyed by its element id when it has one,
+otherwise by name/value plus its structural DOM path -- so distinct elements
+stay distinct choices, while a single checkbox is one control as before. The
+same key is reached from the DOM inventory, `change` events and submitted fields
+(id, dom_path and label are captured on submitted fields too).
+
+**`requestSubmit()` is counted once.** `requestSubmit()` fires a native submit
+event (captured, and carrying the field set) *and* is seen by the prototype
+wrapper; the wrapper record is ignored for `requestSubmit` so the submission is
+not counted twice. `form.submit()`, which fires no native event, is kept. The
+edge this leaves: a `requestSubmit()` whose native submit event never reached
+the probe (an unarmed document) would then not be counted -- on the initial page
+and every re-armed page the listener is present, so this is the exceptional case.
+
+All of the above is proven end to end through the production runner in
+`tests/test_forms_capture_identity.py`.
 
 ### A scroll's isTrusted does not distinguish a programmatic scroll
 

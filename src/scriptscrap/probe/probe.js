@@ -630,6 +630,12 @@
             if (!f.name) return;
             fields.push({
               name: f.name,
+              // id, dom_path and label so a submitted checkbox keys to the same
+              // control its DOM inventory and change events do -- two boxes
+              // sharing a name and value (the implicit "on") stay distinct.
+              id: f.id || null,
+              dom_path: domPath(f),
+              label: labelFor(f),
               tag: f.tagName.toLowerCase(),
               type: f.getAttribute ? f.getAttribute("type") : null,
               value: valueOf(f),
@@ -938,6 +944,11 @@
             action: form.action || null,
             method: (form.method || "GET").toUpperCase(),
             form: form.id || form.getAttribute("name") || null,
+            // The form's structural path, so a programmatically submitted
+            // ANONYMOUS form (no id/name) still merges with the entry its DOM
+            // inventory and inputs built, instead of being dropped for lack of
+            // identity.
+            form_path: domPath(form),
             stack: captureStack(0),
           });
           flush(true); // navigation is imminent

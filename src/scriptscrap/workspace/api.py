@@ -532,6 +532,7 @@ def forms(workspace, query) -> dict:
         "frame_url": f.frame_url,
         "document_instance": f.document_instance,
         "route": f.route,
+        "exact_route": f.exact_route,
         "action": f.action,
         "method": f.method,
         "submitted": f.submitted,

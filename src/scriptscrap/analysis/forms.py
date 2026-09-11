@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 from ..events import Event, EventType
 from .models import Evidence
@@ -94,9 +95,14 @@ class FormCatalogEntry:
     frame_id: str | None
     page_id: str | None = None
     frame_url: str | None = None
-    # The document instance (dN) and route this occurrence was observed in.
+    # The document instance (dN) this occurrence was observed in.
     document_instance: str | None = None
+    # `route` is the STRUCTURAL shape (route_shape: /claims/{id}) for reporting
+    # and state analysis; `exact_route` is the EXACT location (path, query,
+    # fragment) that identifies the occurrence, so /claims/123 and /claims/456
+    # -- one shape, two records -- do not merge.
     route: str | None = None
+    exact_route: str | None = None
     action: str | None = None
     method: str | None = None
     controls: list[FormControl] = field(default_factory=list)
@@ -182,10 +188,31 @@ class FormCatalogAnalyzer:
 
     @staticmethod
     def _route(frame_url) -> str | None:
+        """The STRUCTURAL route shape (identifier-looking segments templated),
+        for reporting and state analysis -- NOT for occurrence identity."""
         if not frame_url:
             return None
         try:
             return route_shape(str(frame_url))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _exact_route(frame_url) -> str | None:
+        """The EXACT location -- path, query and fragment -- so two records that
+        share a structural shape (/claims/123 vs /claims/456) stay distinct
+        occurrences. Scheme and host are omitted: page/frame already scope those.
+        """
+        if not frame_url:
+            return None
+        try:
+            p = urlparse(str(frame_url))
+            route = p.path or "/"
+            if p.query:
+                route += "?" + p.query
+            if p.fragment:
+                route += "#" + p.fragment
+            return route
         except Exception:
             return None
 
@@ -215,8 +242,22 @@ class FormCatalogAnalyzer:
         t = (type_ or "").lower()
         if t == "radio" and name:
             return f"radio:{name}"
-        if t == "checkbox" and name:
-            return f"checkbox:{name}={value if value is not None else ''}"
+        if t == "checkbox":
+            # Two checkboxes can share a name AND a value (the implicit "on"),
+            # so name+value is not enough. Prefer the element id; otherwise
+            # name/value with the structural DOM path, which distinguishes two
+            # otherwise-identical boxes. A single named checkbox with no id and
+            # no path still keys by name/value -- one control, as before.
+            if cid:
+                return f"checkbox:id={cid}"
+            val = value if value is not None else ""
+            if path:
+                return f"checkbox:{name}={val}@{path}"
+            if name is not None:
+                return f"checkbox:{name}={val}"
+            if path:
+                return f"checkbox:@{path}"
+            return None
         if cid:
             return f"id:{cid}"
         if name:
@@ -226,14 +267,15 @@ class FormCatalogAnalyzer:
         return None
 
     def _entry(self, key: str, form_id: str | None, page_id, frame_id,
-               frame_url=None, doc=None, route=None) -> FormCatalogEntry:
+               frame_url=None, doc=None, route=None,
+               exact_route=None) -> FormCatalogEntry:
         entry = self._forms.get(key)
         if entry is None:
             entry = FormCatalogEntry(
                 form_key=key,
                 form_id=form_id if form_id and form_id != "(unnamed)" else None,
                 page_id=page_id, frame_id=frame_id, frame_url=frame_url,
-                document_instance=doc, route=route)
+                document_instance=doc, route=route, exact_route=exact_route)
             self._forms[key] = entry
             self._controls[key] = {}
         return entry
@@ -272,13 +314,14 @@ class FormCatalogAnalyzer:
             # frames of one page do not collide; fall back to the event's frame.
             frame_id = frame.get("frame_id") or event.frame_id
             route = self._route(frame_url)
+            exact = self._exact_route(frame_url)
             doc = self._doc_instance(page_id, frame_id, frame.get("time_origin"))
             for form in frame.get("forms") or []:
                 form_id = form.get("id") or form.get("name")
                 identity = self._identity(form_id, form.get("index"), form.get("path"))
-                key = self._key(page_id, frame_id, identity, doc, route)
+                key = self._key(page_id, frame_id, identity, doc, exact)
                 entry = self._entry(key, form_id, page_id, frame_id, frame_url,
-                                    doc, route)
+                                    doc, route, exact)
                 entry.evidence.cite(event.event_id)
                 entry.action = form.get("action") or entry.action
                 entry.method = (form.get("method") or entry.method or "GET")
@@ -352,11 +395,12 @@ class FormCatalogAnalyzer:
             return
         identity = self._identity(form_id, path=form_path)
         route = self._route(event.payload.get("frame_url"))
+        exact = self._exact_route(event.payload.get("frame_url"))
         doc = self._doc_instance(event.page_id, event.frame_id,
                                  event.payload.get("probe_time_origin"))
-        key = self._key(event.page_id, event.frame_id, identity, doc, route)
+        key = self._key(event.page_id, event.frame_id, identity, doc, exact)
         entry = self._entry(key, form_id, event.page_id, event.frame_id,
-                            event.payload.get("frame_url"), doc, route)
+                            event.payload.get("frame_url"), doc, route, exact)
         entry.evidence.cite(event.event_id)
 
         if (type_ or "").lower() == "radio":
@@ -393,21 +437,30 @@ class FormCatalogAnalyzer:
             control.final_value = value["value"]
 
     def _merge_submit(self, event: Event, ordered: list[Event]) -> None:
+        # requestSubmit() fires a native submit event (captured as USER_SUBMIT,
+        # and it carries the fields) AND is observed by the prototype wrapper as
+        # a RUNTIME_FORM_SUBMIT. Counting both would double the submission, so
+        # the wrapper observation is ignored for requestSubmit; form.submit()
+        # (via "submit") fires NO native event, so its wrapper record is kept.
+        if (event.type is EventType.RUNTIME_FORM_SUBMIT
+                and event.payload.get("via") == "requestSubmit"):
+            return
         element = event.payload.get("element") or {}
         form_id = element.get("id") or element.get("name") or event.payload.get("form")
-        dom_path = element.get("dom_path")
-        # A submit always has a form element; an anonymous one is identified by
-        # its structural path, so two anonymous submits in one document stay
-        # separate.
+        # A native submit's form element carries dom_path; a programmatic
+        # form.submit() carries the form's structural path as `form_path`. Either
+        # identifies an anonymous form, so its inventory, inputs and submit merge.
+        dom_path = element.get("dom_path") or event.payload.get("form_path")
         if not form_id and not dom_path:
             return
         identity = self._identity(form_id, path=dom_path)
         route = self._route(event.payload.get("frame_url"))
+        exact = self._exact_route(event.payload.get("frame_url"))
         doc = self._doc_instance(event.page_id, event.frame_id,
                                  event.payload.get("probe_time_origin"))
-        key = self._key(event.page_id, event.frame_id, identity, doc, route)
+        key = self._key(event.page_id, event.frame_id, identity, doc, exact)
         entry = self._entry(key, form_id, event.page_id, event.frame_id,
-                            event.payload.get("frame_url"), doc, route)
+                            event.payload.get("frame_url"), doc, route, exact)
         entry.evidence.cite(event.event_id)
         entry.submitted = True
         entry.action = event.payload.get("action") or entry.action
@@ -425,15 +478,21 @@ class FormCatalogAnalyzer:
         tag = str(f.get("tag") or "input")
         fvalue = f.get("value") or {}
         opt_value = fvalue.get("value") if isinstance(fvalue.get("value"), str) else None
+        # id, dom_path and label are now captured on submitted fields too, so a
+        # checkbox observed only at submit keys to the same control its
+        # inventory and change events did.
         ck = self._control_key(type_=type_, name=f.get("name"), cid=f.get("id"),
-                               value=opt_value)
+                               value=opt_value, path=f.get("dom_path"))
         if ck is None:
             return
         if (type_ or "").lower() == "radio":
             control = self._control(key, ck, str(f.get("name")), tag)
-            self._radio_option(control, opt_value, None, bool(fvalue.get("checked")))
+            self._radio_option(control, opt_value, f.get("label"),
+                               bool(fvalue.get("checked")))
             return
         control = self._control(key, ck, str(f.get("id") or f.get("name")), tag)
+        if f.get("label"):
+            control.label = f.get("label") or control.label
         if fvalue.get("redacted"):
             control.secret = True
         elif (type_ or "").lower() == "checkbox":
@@ -554,6 +613,7 @@ class FormCatalogAnalyzer:
                     "controls": aria.get("aria-controls"),
                     "region": self._region_identity(element),
                     "route": self._route(event.payload.get("frame_url")),
+                    "exact_route": self._exact_route(event.payload.get("frame_url")),
                     "doc": self._doc_instance(event.page_id, event.frame_id,
                                               event.payload.get("probe_time_origin")),
                     "name": str(element.get("id") or element.get("label")
@@ -576,13 +636,13 @@ class FormCatalogAnalyzer:
                 connection = "aria-controls" if exact else "proximity_same_frame"
 
                 key = self._key(event.page_id, event.frame_id, trig["region"],
-                                trig["doc"], trig["route"])
+                                trig["doc"], trig["exact_route"])
                 entry = self._entry(
                     key,
                     trig["element"].get("form")
                     if trig["element"].get("form") not in (None, "(unnamed)") else None,
                     event.page_id, event.frame_id, event.payload.get("frame_url"),
-                    trig["doc"], trig["route"])
+                    trig["doc"], trig["route"], trig["exact_route"])
                 entry.evidence.cite(trig["event"].event_id, event.event_id)
                 control = self._control(key, f"combobox:{trig['name']}",
                                         trig["name"],

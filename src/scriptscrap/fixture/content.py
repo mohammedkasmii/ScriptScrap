@@ -942,6 +942,92 @@ CUSTOMERS_NEW_HTML = _same_id_form_page(
     "/claims/new", "Go to new claim")
 
 
+# Duplicate checkboxes: two share a name AND the implicit "on" value but have
+# different ids; two more share a name and value with NO ids (distinguished only
+# by structural path). Each must stay a distinct choice.
+DUP_CHECKBOX_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Duplicate Checkboxes</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1>Flags</h1>
+<form id="flags-form" onsubmit="return false;">
+  <label><input type="checkbox" id="opt-a" name="opt"> Alpha</label>
+  <label><input type="checkbox" id="opt-b" name="opt"> Beta</label>
+  <label><input type="checkbox" name="tag"> Red</label>
+  <label><input type="checkbox" name="tag"> Blue</label>
+  <button type="submit" id="flags-submit">Save flags</button>
+</form>
+<script>
+document.documentElement.setAttribute("data-fixture-dup-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
+# An anonymous form (no id, no name) submitted PROGRAMMATICALLY via form.submit(),
+# which fires no native submit event -- only the prototype wrapper observes it.
+PROG_ANON_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Programmatic Submit</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1>Programmatic</h1>
+<form method="GET" action="/prog-anon">
+  <label>Memo <input type="text" name="memo"></label>
+</form>
+<button id="prog-go" type="button">Submit programmatically</button>
+<script>
+document.getElementById("prog-go").addEventListener("click", function () {
+  document.querySelector("form:not([id])").submit();   // no native submit event
+});
+document.documentElement.setAttribute("data-fixture-prog-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
+# One SPA document whose route changes via pushState to two exact records that
+# share a structural shape (/records/{id}). The same form id must yield two
+# occurrences, one per exact location.
+SPA_RECORDS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - SPA Records</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1 id="record-title">Records</h1>
+<form id="entity-form" onsubmit="return false;">
+  <label>Record <input type="text" id="record-field" name="record"></label>
+</form>
+<button id="to-123" type="button">Open 123</button>
+<button id="to-456" type="button">Open 456</button>
+<script>
+document.getElementById("to-123").addEventListener("click", function () {
+  history.pushState({}, "", "/records/123");
+  document.getElementById("record-title").textContent = "Record 123";
+});
+document.getElementById("to-456").addEventListener("click", function () {
+  history.pushState({}, "", "/records/456");
+  document.getElementById("record-title").textContent = "Record 456";
+});
+document.documentElement.setAttribute("data-fixture-spa-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
 FRAME_OUTER_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>

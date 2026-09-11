@@ -15,7 +15,7 @@ import asyncio
 import pytest
 
 from scriptscrap.analysis import analyze_events
-from scriptscrap.events import EventLogReader
+from scriptscrap.events import EventLogReader, EventType
 
 pytestmark = pytest.mark.browser
 
@@ -122,3 +122,47 @@ def test_an_anonymous_forms_input_and_submit_attribute_to_one_entry(result):
     note = next(c for c in entry.controls if c.name == "note")
     assert note.final_value == "an anonymous note"
     assert entry.submitted is True
+
+
+# --- a programmatically submitted anonymous form (its own capture) ---------
+
+async def _prog_workflow(page, engine):
+    await page.wait_for_selector("html[data-fixture-prog-ready='true']",
+                                 state="attached")
+    await page.fill("form:not([id]) input[name='memo']", "typed then submitted")
+    await page.click("#prog-go")     # calls form.submit() -- no native event
+    await page.wait_for_load_state("load")
+    await page.wait_for_timeout(400)
+
+
+async def _run_prog(out):
+    from scriptscrap.fixture import FixtureServer
+    from scriptscrap.testing.capture import load_investigator
+
+    inv = load_investigator()
+    with FixtureServer() as fx:
+        scope = inv.InvestigationScope(fx.base_url)
+        engine = inv.WebHarvester(fx.base_url, scope,
+                                  session_id="sess-20260101-000001", output_dir=out)
+        await inv.run_capture(
+            engine, target_url=fx.base_url + "/prog-anon", forensic_config=None,
+            headless=True, interact=_prog_workflow)
+    return EventLogReader(out / "events.jsonl")
+
+
+def test_an_anonymous_form_submitted_programmatically_is_captured(tmp_path):
+    log = asyncio.run(_run_prog(tmp_path / "out"))
+    assert log.validate() == []
+    # The wrapper observed the programmatic submit and recorded the form's path.
+    rfs = list(log.of_type(EventType.RUNTIME_FORM_SUBMIT))
+    assert any(e.payload.get("form_path") for e in rfs), \
+        "runtime_form_submit carried no form_path for the anonymous form"
+    # The submit merged with the anonymous form's inventory and input.
+    result = analyze_events(list(log), "s")
+    submitted = [f for f in result.forms
+                 if f.form_id is None
+                 and f.submitted
+                 and any(c.name == "memo" for c in f.controls)]
+    assert submitted, "the programmatic anonymous submit was dropped, not merged"
+    memo = next(c for c in submitted[0].controls if c.name == "memo")
+    assert memo.final_value == "typed then submitted"
