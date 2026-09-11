@@ -321,6 +321,15 @@ details[open] > summary::before { content: "▾"; }
 /* A sanitised export carries no event log. `evidenceList` says so in place of
    each drill-through; this hides the affordances that would only 409. */
 body.no-evidence .timeline-link,
-body.no-evidence [data-view="timeline"] {
+body.no-evidence [data-view="timeline"],
+body.no-evidence [data-view="activities"] {
   display: none;
 }
+
+/* Inferred activities */
+.segment-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.segment-index { font-variant-numeric: tabular-nums; color: var(--muted, #6b7280); }
+.segment-label { font-weight: 600; }
+.segment-kv { margin: 4px 0; }
+.segment-key { color: var(--muted, #6b7280); }
+.segment-chip { margin-right: 4px; }

@@ -9,6 +9,7 @@ import { get, setSession } from './lib/api.js';
 
 import * as overview from './views/overview.js';
 import * as timeline from './views/timeline.js';
+import * as activities from './views/activities.js';
 import * as endpoints from './views/endpoints.js';
 import * as states from './views/states.js';
 import * as elements from './views/elements.js';
@@ -20,6 +21,7 @@ import * as generate from './views/generate.js';
 const VIEWS = [
   ['overview', overview],
   ['timeline', timeline],
+  ['activities', activities],
   ['endpoints', endpoints],
   ['states', states],
   ['elements', elements],

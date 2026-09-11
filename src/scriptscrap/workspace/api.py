@@ -480,6 +480,39 @@ def states(workspace, query) -> dict:
         return {"states": rows, "transitions": transitions}
 
 
+# --- inferred activities --------------------------------------------------
+
+def segments(workspace, query) -> dict:
+    """The session split into probable business activities.
+
+    Re-derived from the log per session, memoised on the log's identity like
+    the generators are: segments are few and cheap, and keeping them out of the
+    store means the SQL shape does not move for a view. A sanitised export has
+    no log, so `_analysis_for` raises `EvidenceUnavailable` -- which the server
+    turns into a 409 the reader can act on, not a blank panel.
+    """
+    handle = _handle(workspace, query)
+    result = _analysis_for(handle)
+    return {"segments": [{
+        "index": s.index,
+        "start_seq": s.start_seq,
+        "end_seq": s.end_seq,
+        "start_wall": s.start_wall,
+        "end_wall": s.end_wall,
+        "duration_ms": s.duration_ms,
+        "label": s.label,
+        "boundary_reason": s.boundary_reason,
+        "outcome": s.outcome,
+        "action_count": s.action_count,
+        "action_kinds": s.action_kinds,
+        "routes": s.routes,
+        "forms": s.forms,
+        "endpoints": s.endpoints,
+        "confidence": s.confidence,
+        "evidence_ids": s.evidence.event_ids,
+    } for s in result.segments]}
+
+
 # --- workflow -------------------------------------------------------------
 
 def workflow(workspace, query) -> dict:
@@ -659,6 +692,7 @@ def generate(workspace, query) -> dict:
 ROUTES = {
     "sessions": sessions,
     "generate": generate,
+    "segments": segments,
     "session": session_overview,
     "endpoints": endpoints,
     "endpoint": endpoint_detail,
