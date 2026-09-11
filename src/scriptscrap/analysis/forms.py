@@ -65,15 +65,27 @@ class FormControl:
     options_complete: bool = False
     final_value: str | None = None
     secret: bool = False
+    # For a combobox: the listbox it drives, and how trigger and option were
+    # connected -- an exact aria-controls match, or a same-frame proximity guess.
+    listbox: str | None = None
+    connection: str | None = None
 
 
 @dataclass(slots=True)
 class FormCatalogEntry:
-    """One form the operator used, assembled from every observation of it."""
+    """One form the operator used, assembled from every observation of it.
+
+    Identity is unique across the whole session: `form_key` combines the page,
+    the frame/document, and the form (its id/name, or -- for an anonymous form
+    -- its index and structural path). Two tabs each showing `id="form1"`, and
+    two anonymous forms in one frame, are therefore distinct entries.
+    """
 
     form_key: str
     form_id: str | None
     frame_id: str | None
+    page_id: str | None = None
+    frame_url: str | None = None
     action: str | None = None
     method: str | None = None
     controls: list[FormControl] = field(default_factory=list)
@@ -117,15 +129,36 @@ class FormCatalogAnalyzer:
 
     # -- keys --------------------------------------------------------------
     @staticmethod
-    def _key(form_id: str | None, frame_ref: str | None) -> str:
-        if form_id:
-            return str(form_id)
-        return f"@formless@{frame_ref or '?'}"
+    def _identity(form_id: str | None, index=None, path: str | None = None) -> str:
+        """The form half of the key, within a document.
 
-    def _entry(self, key: str, form_id: str | None, frame_id: str | None) -> FormCatalogEntry:
+        A real id/name identifies the form. Without one, the form's index in the
+        document plus its structural path do -- so two anonymous forms in one
+        frame stay distinct. `(unnamed)` is the probe's placeholder for "no id",
+        so it is treated as absent.
+        """
+        if form_id and form_id != "(unnamed)":
+            return f"id:{form_id}"
+        if index is not None:
+            return f"idx:{index}" + (f"@{path}" if path else "")
+        if path:
+            return f"path:{path}"
+        return "anon"
+
+    @staticmethod
+    def _key(page_id, frame_id, identity: str) -> str:
+        # Page AND frame/document: frame ids are session-unique, and the page id
+        # keeps two frames that could not be told apart still separate.
+        return f"{page_id or '?'}::{frame_id or '?'}::{identity}"
+
+    def _entry(self, key: str, form_id: str | None, page_id, frame_id,
+               frame_url=None) -> FormCatalogEntry:
         entry = self._forms.get(key)
         if entry is None:
-            entry = FormCatalogEntry(form_key=key, form_id=form_id, frame_id=frame_id)
+            entry = FormCatalogEntry(
+                form_key=key,
+                form_id=form_id if form_id and form_id != "(unnamed)" else None,
+                page_id=page_id, frame_id=frame_id, frame_url=frame_url)
             self._forms[key] = entry
             self._controls[key] = {}
         return entry
@@ -139,12 +172,17 @@ class FormCatalogAnalyzer:
 
     # -- 1. DOM scan seed --------------------------------------------------
     def _seed_from_dom(self, event: Event) -> None:
+        page_id = event.payload.get("page_id") or event.page_id
         for frame in event.payload.get("frames") or []:
             frame_url = frame.get("frame_url")
+            # Per-frame id when the scan recorded it, so forms in different
+            # frames of one page do not collide; fall back to the event's frame.
+            frame_id = frame.get("frame_id") or event.frame_id
             for form in frame.get("forms") or []:
-                form_id = form.get("id")
-                key = self._key(form_id, frame_url)
-                entry = self._entry(key, form_id, event.frame_id)
+                form_id = form.get("id") or form.get("name")
+                identity = self._identity(form_id, form.get("index"), form.get("path"))
+                key = self._key(page_id, frame_id, identity)
+                entry = self._entry(key, form_id, page_id, frame_id, frame_url)
                 entry.evidence.cite(event.event_id)
                 entry.action = form.get("action") or entry.action
                 entry.method = (form.get("method") or entry.method or "GET")
@@ -187,9 +225,10 @@ class FormCatalogAnalyzer:
         name = element.get("id") or element.get("name")
         if not name:
             return
-        frame_ref = event.payload.get("frame_url") or event.frame_id
-        key = self._key(form_id, frame_ref)
-        entry = self._entry(key, str(form_id) if form_id else None, event.frame_id)
+        identity = self._identity(form_id)
+        key = self._key(event.page_id, event.frame_id, identity)
+        entry = self._entry(key, form_id, event.page_id, event.frame_id,
+                            event.payload.get("frame_url"))
         entry.evidence.cite(event.event_id)
 
         control = self._control(key, str(name), str(element.get("tag") or "input"))
@@ -218,11 +257,16 @@ class FormCatalogAnalyzer:
     def _merge_submit(self, event: Event, ordered: list[Event]) -> None:
         element = event.payload.get("element") or {}
         form_id = element.get("id") or element.get("name") or event.payload.get("form")
-        if not form_id:
+        dom_path = element.get("dom_path")
+        # A submit always has a form element; an anonymous one is identified by
+        # its structural path, so two anonymous submits in one document stay
+        # separate.
+        if not form_id and not dom_path:
             return
-        frame_ref = event.payload.get("frame_url") or event.frame_id
-        key = self._key(str(form_id), frame_ref)
-        entry = self._entry(key, str(form_id), event.frame_id)
+        identity = self._identity(form_id, path=dom_path)
+        key = self._key(event.page_id, event.frame_id, identity)
+        entry = self._entry(key, form_id, event.page_id, event.frame_id,
+                            event.payload.get("frame_url"))
         entry.evidence.cite(event.event_id)
         entry.submitted = True
         entry.action = event.payload.get("action") or entry.action
@@ -242,13 +286,41 @@ class FormCatalogAnalyzer:
         self._correlate(entry, event, ordered)
 
     def _correlate(self, entry, submit_event, ordered) -> None:
+        """Correlate submit -> request -> response/navigation, WITHIN the
+        submitting page and frame.
+
+        A frame id is session-unique, so matching it pins the request/navigation
+        to the same document that submitted -- another tab's request or another
+        tab's navigation can never be adopted. Without a frame/page identity on
+        the submit there is nothing to scope to, so the outcome is left
+        uncorrelated and said to be so, rather than borrowing a global event.
+        """
+        sframe = submit_event.frame_id
+        spage = submit_event.page_id
+        if sframe is None and spage is None:
+            entry.outcome = {"kind": "uncorrelated",
+                             "reason": "the submit carried no page or frame "
+                                       "identity to scope its outcome to"}
+            return
+
+        def same_document(e) -> bool:
+            # Frame id is unique per document across the whole session; when it
+            # is present on both, it is the precise test. Otherwise fall back to
+            # the page id, never wider.
+            if sframe is not None and e.frame_id is not None:
+                return e.frame_id == sframe
+            if spage is not None and e.page_id is not None:
+                return e.page_id == spage
+            return False
+
         window = [e for e in ordered
                   if submit_event.seq < e.seq <= submit_event.seq + _REQUEST_WINDOW]
+
         request = next(
             (e for e in window
              if e.type in _REQUEST_EVENT_TYPES
              and not e.payload.get("evidence_reduced")
-             and (e.frame_id == submit_event.frame_id or e.frame_id is None)),
+             and same_document(e)),
             None)
         if request is not None:
             entry.associated_request = {
@@ -259,7 +331,8 @@ class FormCatalogAnalyzer:
             entry.evidence.cite(request.event_id)
 
         nav = next((e for e in window
-                    if e.type is EventType.NAVIGATION_COMMITTED and e.payload.get("url")),
+                    if e.type is EventType.NAVIGATION_COMMITTED
+                    and e.payload.get("url") and same_document(e)),
                    None)
         if nav is not None:
             entry.outcome = {"kind": "navigation",
@@ -269,6 +342,7 @@ class FormCatalogAnalyzer:
             return
         response = next(
             (e for e in window if e.type is EventType.HTTP_RESPONSE
+             and same_document(e)
              and (not request or e.payload.get("path") == entry_path(entry))),
             None)
         if response is not None:
@@ -278,35 +352,82 @@ class FormCatalogAnalyzer:
             entry.evidence.cite(response.event_id)
 
     # -- 3. ARIA comboboxes ------------------------------------------------
+    @staticmethod
+    def _region_identity(element: dict) -> str:
+        """The captured region a control belongs to -- a real form/fieldset/
+        dialog/section/region id, or the control's own id. NEVER the frame.
+
+        `element.form` is a real <form>; `element.region` is the closest
+        role=form / fieldset / dialog / section / region the probe recorded. A
+        control with neither is keyed by its own id, which is still an element
+        identity, not the whole document.
+        """
+        form_id = element.get("form")
+        if form_id and form_id != "(unnamed)":
+            return f"id:{form_id}"
+        region = element.get("region")
+        if region:
+            return f"region:{region}"
+        own = element.get("id")
+        if own:
+            return f"region@{own}"
+        return "region:?"
+
     def _merge_comboboxes(self, ordered: list[Event]) -> None:
-        pending = None       # (entry_key, control_name, trigger_event, form_id, frame, trigger_el)
-        clicks_since = 0
+        # Pending trigger PER (page, frame): an option click can only ever
+        # connect to a trigger in its OWN page and frame, never another tab's.
+        pending: dict[tuple, dict] = {}
+        clicks_since: dict[tuple, int] = {}
+
         for event in ordered:
             if event.type not in _CLICK_TYPES:
                 continue
             element = event.payload.get("element") or {}
             aria = element.get("aria") or {}
             role = element.get("role")
+            scope = (event.page_id, event.frame_id)
+
             is_trigger = (role == "combobox"
                           or aria.get("aria-haspopup") == "listbox"
                           or (aria.get("aria-controls") and role != "option"))
             if is_trigger:
-                form_id = element.get("form")
-                frame_ref = event.payload.get("frame_url") or event.frame_id
-                key = self._key(form_id, frame_ref)
-                name = str(element.get("id") or element.get("label")
-                           or aria.get("aria-controls") or "combobox")
-                pending = (key, name, event, form_id, event.frame_id, element)
-                clicks_since = 0
+                pending[scope] = {
+                    "event": event, "element": element,
+                    "controls": aria.get("aria-controls"),
+                    "region": self._region_identity(element),
+                    "name": str(element.get("id") or element.get("label")
+                                or aria.get("aria-controls") or "combobox"),
+                }
+                clicks_since[scope] = 0
                 continue
-            if role == "option" and pending is not None and clicks_since < _COMBO_WINDOW:
-                key, name, trigger_event, form_id, frame_id, trigger_el = pending
-                entry = self._entry(key, str(form_id) if form_id else None, frame_id)
-                entry.evidence.cite(trigger_event.event_id, event.event_id)
-                control = self._control(key, name, str(trigger_el.get("tag") or "div"))
+
+            if role == "option":
+                trig = pending.get(scope)
+                if trig is None or clicks_since.get(scope, 0) >= _COMBO_WINDOW:
+                    clicks_since[scope] = clicks_since.get(scope, 0) + 1
+                    continue
+                # Exact match: the option's owning listbox equals the trigger's
+                # aria-controls. Otherwise a proximity fallback -- but only
+                # within this same page/frame, and marked heuristic.
+                opt_listbox = element.get("listbox") or (aria.get("aria-controls"))
+                controls = trig["controls"]
+                exact = bool(controls) and controls == opt_listbox
+                connection = "aria-controls" if exact else "proximity_same_frame"
+
+                key = self._key(event.page_id, event.frame_id, trig["region"])
+                entry = self._entry(
+                    key,
+                    trig["element"].get("form")
+                    if trig["element"].get("form") not in (None, "(unnamed)") else None,
+                    event.page_id, event.frame_id, event.payload.get("frame_url"))
+                entry.evidence.cite(trig["event"].event_id, event.event_id)
+                control = self._control(key, trig["name"],
+                                        str(trig["element"].get("tag") or "div"))
                 control.kind = "combobox"
                 control.role = "combobox"
-                control.label = trigger_el.get("label") or control.label
+                control.label = trig["element"].get("label") or control.label
+                control.listbox = opt_listbox
+                control.connection = connection
                 text = element.get("text") or element.get("label")
                 control.selected_label = text
                 opt = {"value": element.get("id") or text, "text": text}
@@ -315,8 +436,8 @@ class FormCatalogAnalyzer:
                 # Only the chosen option was observed; the listbox was not
                 # enumerated, so the set is NOT complete.
                 control.options_complete = False
-                pending = None
-            clicks_since += 1
+                pending.pop(scope, None)
+            clicks_since[scope] = clicks_since.get(scope, 0) + 1
 
 
 def entry_path(entry: FormCatalogEntry) -> str | None:

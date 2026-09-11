@@ -478,9 +478,36 @@ DOM_PROBE_JS = """
         return base;
     };
 
+    // A structural path for the form element, so two anonymous forms in one
+    // document have distinct identities the offline catalog can key on. Same
+    // shape as the probe's domPath: tag[#id] with :nth-of-type disambiguation.
+    const formPath = (el) => {
+        try {
+            const parts = [];
+            let node = el;
+            let depth = 0;
+            while (node && node.nodeType === 1 && depth < 8) {
+                let part = node.tagName.toLowerCase();
+                if (node.id) { parts.unshift(part + "#" + node.id); break; }
+                const parent = node.parentElement;
+                if (parent) {
+                    const same = Array.prototype.filter.call(
+                        parent.children, (c) => c.tagName === node.tagName);
+                    if (same.length > 1) part += ":nth-of-type(" + (same.indexOf(node) + 1) + ")";
+                }
+                parts.unshift(part);
+                node = node.parentElement;
+                depth++;
+            }
+            return parts.join(" > ");
+        } catch (e) { return null; }
+    };
+
     const forms = querySelectorAllDeep("form").map((form, idx) => ({
         index: idx,
         id: form.id || null,
+        name: form.getAttribute ? form.getAttribute("name") : null,
+        path: formPath(form),
         action: form.action || window.location.href,
         method: (form.method || "GET").toUpperCase(),
         fields: querySelectorAllDeep("input, select, textarea, button", form).map(parseElement)
@@ -967,6 +994,7 @@ class WebHarvester:
         if not self.scope.contains(page.url):
             return
 
+        page_id = self.registry.page_id(page) if self.registry else None
         results = []
         skipped_hosts: dict[str, int] = {}
         for frame in page.frames:
@@ -977,7 +1005,8 @@ class WebHarvester:
                 continue
             try:
                 dom = await frame.evaluate(DOM_PROBE_JS)
-                results.append({"frame_url": frame.url, "data": dom})
+                frame_id = self.registry.frame_id(frame) if self.registry else None
+                results.append({"frame_url": frame.url, "frame_id": frame_id, "data": dom})
             except Exception as exc:
                 # A frame we could not read is a hole, not an empty frame.
                 self.emit_sensor_error(
@@ -1018,7 +1047,8 @@ class WebHarvester:
         )
 
         inventory = [
-            {"frame_url": r["frame_url"], "forms": r["data"].get("forms", [])}
+            {"frame_url": r["frame_url"], "frame_id": r["frame_id"],
+             "forms": r["data"].get("forms", [])}
             for r in results
         ]
         digest = hashlib.sha256(
@@ -1029,9 +1059,13 @@ class WebHarvester:
         # the log and make "when did this form appear?" unanswerable by reading.
         if digest != self._last_form_inventory:
             self._last_form_inventory = digest
+            # page_id on the envelope so form identity can be made unique across
+            # tabs; per-frame frame_id inside `frames` makes it unique across
+            # frames too.
             self.emit_event(
                 EV.Source.ENGINE,
                 EV.EventType.DOM_FORMS,
+                page_id=page_id,
                 url=page.url,
                 frames=inventory,
                 inventory_sha256=digest,

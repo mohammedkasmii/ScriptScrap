@@ -527,7 +527,9 @@ def forms(workspace, query) -> dict:
     return {"forms": [{
         "form_id": f.form_id,
         "form_key": f.form_key,
+        "page_id": f.page_id,
         "frame_id": f.frame_id,
+        "frame_url": f.frame_url,
         "action": f.action,
         "method": f.method,
         "submitted": f.submitted,
@@ -550,6 +552,8 @@ def forms(workspace, query) -> dict:
             "options_complete": c.options_complete,
             "final_value": c.final_value,
             "secret": c.secret,
+            "listbox": c.listbox,
+            "connection": c.connection,
         } for c in f.controls],
         "evidence_ids": f.evidence.event_ids,
     } for f in result.forms]}
