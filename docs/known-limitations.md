@@ -147,6 +147,35 @@ probe. The browser test therefore fires the DragEvent sequence from the page's
 own world, which exercises the same listener path; a trusted drag by a human is
 believed to work but is not proven in CI.
 
+### An anonymous form's typed values are attributed only coarsely
+
+Form identity is (page, frame/document, form). A form with an id/name is exact;
+an anonymous form is separated by its document index and structural path, which
+the DOM scan and a submit both carry. An `input`/`change` event on a field of an
+anonymous form, however, reports only `form: "(unnamed)"`, so its typed value
+cannot be attributed to a *specific* anonymous form and lands in a per-frame
+`anon` control group. Anonymous forms stay SEPARATE (the correctness guarantee);
+merging their live field values is the part that is coarse.
+
+### A scroll's isTrusted does not distinguish a programmatic scroll
+
+`isTrusted` is recorded on hover, drag and scroll. For drag it is decisive -- a
+scripted `DragEvent` is `isTrusted === false`. For scroll it is not: the browser
+dispatches the scroll event with `isTrusted === true` even when the scroll
+position was set programmatically, so the flag cannot tell a programmatic scroll
+from a human one. The value is recorded as-is; the table catalog never claims
+"the employee scrolled", only that rows were observed via a scroll.
+
+### A popup closed faster than its first snapshot loses its final state
+
+Coverage snapshots a new page eagerly rather than waiting for the 2-second poll,
+so a popup used and closed in a second or two still yields its DOM/form
+inventory. A page closed before even that eager snapshot completes emits a
+`page_closed_before_capture` gap. Live user actions on it may still have been
+captured -- the probe flushes on pagehide -- but that flush races the teardown,
+so a value typed and the page closed within a few hundred milliseconds can be
+lost; the gap makes the incompleteness explicit rather than silent.
+
 ### Popup isolated-world listeners are re-armed, not native
 
 A Camoufox quirk: the context-level init script defines the probe's globals in a
