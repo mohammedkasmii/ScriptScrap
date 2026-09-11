@@ -17,6 +17,22 @@ uv sync --all-groups
 uv run python -m camoufox fetch     # one-off, downloads the browser
 ```
 
+### Clean Windows agency PC
+
+Copy the complete project folder to the PC, open PowerShell in that folder, and
+run the bootstrap installer. It installs `uv` and Python for the current user,
+syncs the locked runtime dependencies, fetches the verified Camoufox browser
+build, runs the environment doctor, and launches an offline browser smoke test.
+Administrator rights and preinstalled development tools are not required.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-ScriptScrap.ps1
+```
+
+The first installation requires HTTPS access to `astral.sh`, the Python package
+index and GitHub releases. To include pytest and Ruff on a validation machine,
+add `-IncludeDeveloperTools`. The installer stops on the first failed step.
+
 Dependencies are pinned and locked (`uv.lock`). **The pinned versions are part of
 the behavioural baseline** — every empirical finding the design rests on (JS world
 semantics, runtime hook timing, uBlock default-addon filtering, snapshot
