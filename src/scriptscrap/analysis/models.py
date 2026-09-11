@@ -353,6 +353,12 @@ class AnalysisResult:
     # Forensic-era additions. Empty on a normal session, which is what keeps
     # analysis working without the extension.
     activities: list[Any] = field(default_factory=list)
+    # Automatically inferred business activities: a long session split into
+    # probable tasks from idle gaps, form submissions and route structure.
+    # An interpretation over the timeline, never a rewrite of it -- the ordered
+    # workflow and event log stay intact beside this. Empty when no user action
+    # was recorded.
+    segments: list[Any] = field(default_factory=list)
     health: dict[str, Any] | None = None
     scripts: list[dict[str, Any]] = field(default_factory=list)
     # Credential-bearing header NAMES the application sent, and how often.

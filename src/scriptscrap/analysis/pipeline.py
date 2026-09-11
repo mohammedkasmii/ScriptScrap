@@ -25,6 +25,7 @@ from .models import (
 )
 from .reconcile import Reconciler
 from .schema import SchemaInferrer
+from .segmentation import SegmentationAnalyzer
 from .selectors import SelectorAnalyzer
 from .states import StateAnalyzer
 from .technology import TechnologyAnalyzer, opaque_state_fields
@@ -53,6 +54,9 @@ def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
     result.ui_elements = SelectorAnalyzer().analyze(events)
     result.states, result.transitions = StateAnalyzer().analyze(events)
     result.workflow = WorkflowAnalyzer().analyze(events)
+    # A long session, split into probable business activities. The ordered
+    # workflow above is untouched: this is an interpretation laid over it.
+    result.segments = SegmentationAnalyzer().analyze(events)
     # Forensic evidence, when present. A normal session yields empty lists and
     # a health report built from the sensors that did run -- analysis must
     # never require the extension.

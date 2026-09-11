@@ -31,6 +31,7 @@ from .models import (
 )
 from .pipeline import analyze_events, analyze_log
 from .schema import SchemaInferrer
+from .segmentation import ActivitySegment, SegmentationAnalyzer
 from .selectors import SelectorAnalyzer, generated_id_warning, semantic_key
 from .states import StateAnalyzer, route_shape
 from .store import DerivedStore
@@ -38,6 +39,7 @@ from .technology import TechnologyAnalyzer
 
 __all__ = [
     "ANALYSIS_VERSION",
+    "ActivitySegment",
     "AnalysisResult",
     "AppState",
     "CorrelationAnalyzer",
@@ -52,6 +54,7 @@ __all__ = [
     "Schema",
     "SchemaField",
     "SchemaInferrer",
+    "SegmentationAnalyzer",
     "SelectorAnalyzer",
     "StateAnalyzer",
     "StateTransition",

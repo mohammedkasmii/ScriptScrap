@@ -186,6 +186,21 @@ def render(result: AnalysisResult) -> str:
              for t in result.transitions],
         )
 
+    # -- inferred activities ----------------------------------------------
+    if result.segments:
+        lines += ["## Inferred activities", "",
+                  "The session, split into probable business activities from idle "
+                  "gaps, form submissions and route structure. This is an "
+                  "**interpretation** of the timeline, not a rewrite of it: the "
+                  "ordered workflow above is intact, and each activity cites the "
+                  "raw events behind it. `confidence` reflects how intentional the "
+                  "boundary evidence was.", ""]
+        lines += _table(
+            ["#", "Activity", "Actions", "Began", "Ended", "Conf"],
+            [[s.index, s.label, s.action_count, s.boundary_reason, s.outcome,
+              f"{s.confidence:.2f}"] for s in result.segments],
+        )
+
     # -- capture health ----------------------------------------------------
     if result.health:
         health = result.health

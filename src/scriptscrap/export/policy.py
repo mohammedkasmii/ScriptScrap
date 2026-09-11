@@ -557,6 +557,11 @@ POLICY: dict[tuple[str, str], Disposition] = {
     ("AnalysisResult", "technologies"): Disposition.STRUCTURAL,
     ("AnalysisResult", "findings"): Disposition.STRUCTURAL,
     ("AnalysisResult", "activities"): Disposition.DROP,
+    # Inferred activity segments carry route shapes, form ids and endpoint
+    # paths -- application-authored text. A shareable export drops them and the
+    # reader consults the local session; a sanitised segment view is future
+    # work, and DROP is the safe default until each of its fields is classified.
+    ("AnalysisResult", "segments"): Disposition.DROP,
     # NOT counts. Verified against the real capture: capture_health holds
     # `overall: "PARTIAL / HIGH COVERAGE"`, eight `sensors[].reasons` strings
     # and two `notes` strings, all with whitespace. A COUNTS disposition would
