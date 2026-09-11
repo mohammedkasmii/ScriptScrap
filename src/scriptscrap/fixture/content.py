@@ -864,6 +864,84 @@ window.__page2ParseTimeCall = page2ParseTimeFixture(21);
 </html>
 """
 
+# A form with id-less radio and checkbox groups (controls sharing a name but no
+# id) plus a genuinely anonymous form (no id, no name). Exercises radio-group
+# aggregation, distinct same-named checkboxes, and anonymous-form event
+# attribution (DOM inventory + input + submit resolving to one entry).
+CHOICES_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Choices</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1 id="choices-title">Choices</h1>
+
+<form id="prefs-form" onsubmit="return false;">
+  <fieldset>
+    <legend>Plan</legend>
+    <label><input type="radio" name="plan" value="basic"> Basic</label>
+    <label><input type="radio" name="plan" value="pro" checked> Pro</label>
+    <label><input type="radio" name="plan" value="max"> Max</label>
+  </fieldset>
+  <fieldset>
+    <legend>Toppings</legend>
+    <label><input type="checkbox" name="topping" value="cheese"> Cheese</label>
+    <label><input type="checkbox" name="topping" value="olives"> Olives</label>
+    <label><input type="checkbox" name="topping" value="ham"> Ham</label>
+  </fieldset>
+  <button type="submit" id="prefs-submit">Save preferences</button>
+</form>
+
+<!-- A genuinely anonymous form: no id and no name attribute. -->
+<form onsubmit="return false;">
+  <label>Note <input type="text" name="note"></label>
+  <button type="submit" id="anon-submit">Save note</button>
+</form>
+
+<script>
+document.documentElement.setAttribute("data-fixture-choices-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
+# Two routes that serve DIFFERENT documents carrying the SAME form id, so a
+# same-tab navigation between them proves the catalog does not merge them.
+def _same_id_form_page(title, route, field_label, field_name, next_route,
+                       next_label):
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - {title}</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1>{title}</h1>
+<form id="entity-form" method="POST" action="{route}">
+  <label>{field_label} <input type="text" id="entity-field" name="{field_name}"></label>
+  <button type="submit" id="entity-submit">Submit</button>
+</form>
+<a id="go-next" href="{next_route}">{next_label}</a>
+<script>
+document.documentElement.setAttribute("data-fixture-entity-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
+CLAIMS_NEW_HTML = _same_id_form_page(
+    "New Claim", "/claims/new", "Claim reference", "claim_ref",
+    "/customers/new", "Go to new customer")
+CUSTOMERS_NEW_HTML = _same_id_form_page(
+    "New Customer", "/customers/new", "Customer name", "customer_name",
+    "/claims/new", "Go to new claim")
+
+
 FRAME_OUTER_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>

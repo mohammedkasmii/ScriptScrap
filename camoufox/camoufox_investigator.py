@@ -444,6 +444,33 @@ DOM_PROBE_JS = """
         type === "password" ||
         SECRET_NAME.test(((el.name || "") + " " + (el.id || "")));
 
+    // A structural path, byte-for-byte the same algorithm the runtime probe's
+    // domPath uses, so a form's path here equals the form_path a probe event
+    // records for a field inside it -- which is how an anonymous form's
+    // inventory, inputs and submit are keyed together offline. Works for any
+    // element: a form (for its identity) or a field (for structural fallback).
+    const domPathOf = (el) => {
+        try {
+            const parts = [];
+            let node = el;
+            let depth = 0;
+            while (node && node.nodeType === 1 && depth < 8) {
+                let part = node.tagName.toLowerCase();
+                if (node.id) { parts.unshift(part + "#" + node.id); break; }
+                const parent = node.parentElement;
+                if (parent) {
+                    const same = Array.prototype.filter.call(
+                        parent.children, (c) => c.tagName === node.tagName);
+                    if (same.length > 1) part += ":nth-of-type(" + (same.indexOf(node) + 1) + ")";
+                }
+                parts.unshift(part);
+                node = node.parentElement;
+                depth++;
+            }
+            return parts.join(" > ");
+        } catch (e) { return null; }
+    };
+
     const parseElement = (el) => {
         const tag = el.tagName.toLowerCase();
         const type = (el.type || "").toLowerCase();
@@ -452,6 +479,8 @@ DOM_PROBE_JS = """
             tag, type,
             name: el.name || el.getAttribute("name") || null,
             id: el.id || null,
+            // Structural identity for a control with neither id nor name.
+            path: domPathOf(el),
             placeholder: el.placeholder || el.getAttribute("placeholder") || null,
             // So an untouched but visible control is fully described offline.
             label: labelText(el),
@@ -478,42 +507,24 @@ DOM_PROBE_JS = """
         return base;
     };
 
-    // A structural path for the form element, so two anonymous forms in one
-    // document have distinct identities the offline catalog can key on. Same
-    // shape as the probe's domPath: tag[#id] with :nth-of-type disambiguation.
-    const formPath = (el) => {
-        try {
-            const parts = [];
-            let node = el;
-            let depth = 0;
-            while (node && node.nodeType === 1 && depth < 8) {
-                let part = node.tagName.toLowerCase();
-                if (node.id) { parts.unshift(part + "#" + node.id); break; }
-                const parent = node.parentElement;
-                if (parent) {
-                    const same = Array.prototype.filter.call(
-                        parent.children, (c) => c.tagName === node.tagName);
-                    if (same.length > 1) part += ":nth-of-type(" + (same.indexOf(node) + 1) + ")";
-                }
-                parts.unshift(part);
-                node = node.parentElement;
-                depth++;
-            }
-            return parts.join(" > ");
-        } catch (e) { return null; }
-    };
-
     const forms = querySelectorAllDeep("form").map((form, idx) => ({
         index: idx,
         id: form.id || null,
         name: form.getAttribute ? form.getAttribute("name") : null,
-        path: formPath(form),
+        path: domPathOf(form),
         action: form.action || window.location.href,
         method: (form.method || "GET").toUpperCase(),
         fields: querySelectorAllDeep("input, select, textarea, button", form).map(parseElement)
     }));
 
-    return { forms };
+    // The document instance this inventory belongs to. It is the same clock the
+    // runtime probe stamps on every event (performance.timeOrigin) and changes
+    // on each full navigation, so a form scanned before a navigation and one
+    // scanned after -- same frame, same id -- are told apart offline.
+    let timeOrigin = null;
+    try { timeOrigin = performance.timeOrigin; } catch (e) { timeOrigin = null; }
+
+    return { forms, time_origin: timeOrigin };
 })();
 """
 
@@ -1048,6 +1059,10 @@ class WebHarvester:
 
         inventory = [
             {"frame_url": r["frame_url"], "frame_id": r["frame_id"],
+             # The document instance (performance.timeOrigin) this frame's forms
+             # were inventoried in, so a re-scan after a navigation is new
+             # evidence and offline keying can separate the two documents.
+             "time_origin": r["data"].get("time_origin"),
              "forms": r["data"].get("forms", [])}
             for r in results
         ]

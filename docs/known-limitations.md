@@ -147,15 +147,28 @@ probe. The browser test therefore fires the DragEvent sequence from the page's
 own world, which exercises the same listener path; a trusted drag by a human is
 believed to work but is not proven in CI.
 
-### An anonymous form's typed values are attributed only coarsely
+### Form identity is by occurrence, which depends on the route being observable
 
-Form identity is (page, frame/document, form). A form with an id/name is exact;
-an anonymous form is separated by its document index and structural path, which
-the DOM scan and a submit both carry. An `input`/`change` event on a field of an
-anonymous form, however, reports only `form: "(unnamed)"`, so its typed value
-cannot be attributed to a *specific* anonymous form and lands in a per-frame
-`anon` control group. Anonymous forms stay SEPARATE (the correctness guarantee);
-merging their live field values is the part that is coarse.
+A form entry is one OCCURRENCE, keyed by page, frame, document instance and
+route as well as the form's own identity (its id/name, or -- anonymous -- its
+structural path). The document instance is `performance.timeOrigin`, stamped on
+every DOM scan and every runtime event and renewed on each full navigation, so a
+frame that navigates (its id survives) still yields separate forms per document.
+An SPA route change is *not* a new document, so the route -- `route_shape` of the
+frame URL -- separates two same-id forms shown at different SPA routes.
+
+The one honest dependency: an SPA that changes what a form *is* without changing
+the URL or fragment at all (route held purely in JavaScript state) presents two
+occurrences the capture cannot tell apart, because nothing observable
+distinguishes them; they share a key. Every router that reflects its route in
+the path or fragment -- the common case -- is separated correctly.
+
+Anonymous forms are attributed precisely, not coarsely: the DOM inventory, each
+`input`/`change`, and the submit all carry the owning form's structural path
+(the same `domPath` on both the scanner and the probe), so they resolve to one
+entry and the typed value lands on the right form. Two anonymous forms in one
+document have distinct paths and stay separate. This is proven end to end
+through the production runner in `tests/test_forms_capture_identity.py`.
 
 ### A scroll's isTrusted does not distinguish a programmatic scroll
 

@@ -490,7 +490,14 @@
       if (text) fp.text = clip(text.slice(0, 120));
     } catch (e) { /* ignore */ }
     try {
-      if (el.form) fp.form = el.form.id || el.form.getAttribute("name") || "(unnamed)";
+      if (el.form) {
+        fp.form = el.form.id || el.form.getAttribute("name") || "(unnamed)";
+        // The owning form's structural path, captured on EVERY event (input,
+        // change, click), not only on submit. It is the same domPath the DOM
+        // scan records for the form, so a field of an anonymous form resolves
+        // to the same catalog key its inventory and its submit do.
+        fp.form_path = domPath(el.form);
+      }
     } catch (e) { /* ignore */ }
     try {
       const data = {};

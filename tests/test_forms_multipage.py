@@ -23,27 +23,42 @@ def _reset():
 
 
 def ev(etype, payload, *, source=Source.RUNTIME, page="p1", frame="f1",
-       frame_url="http://h/"):
+       frame_url="http://h/", origin=None):
     n = next(_seq)
     body = dict(payload)
     body.setdefault("frame_url", frame_url)
+    # The document instance an observation belongs to (performance.timeOrigin).
+    if origin is not None:
+        body.setdefault("probe_time_origin", origin)
     return Event(session_id="s", event_id=f"evt-{n:08d}", seq=n,
                  t_wall=f"2026-01-01T00:00:{n % 60:02d}+00:00", t_mono=float(n),
                  source=source, type=etype, payload=body, page_id=page, frame_id=frame)
 
 
-def submit(form_id, *, page, frame, action="/api/x", method="POST", dom_path=None):
+def submit(form_id, *, page, frame, action="/api/x", method="POST", dom_path=None,
+           frame_url="http://h/", origin=None, fields=None):
     element = {"tag": "form", "id": form_id, "dom_path": dom_path}
     return ev(EventType.USER_SUBMIT,
-              {"element": element, "action": action, "method": method, "fields": []},
-              page=page, frame=frame)
+              {"element": element, "action": action, "method": method,
+               "fields": fields or []},
+              page=page, frame=frame, frame_url=frame_url, origin=origin)
 
 
-def dom_forms(forms, *, page, frame, frame_url="http://h/"):
+def dom_forms(forms, *, page, frame, frame_url="http://h/", origin=None):
+    frame_entry = {"frame_url": frame_url, "frame_id": frame, "forms": forms}
+    if origin is not None:
+        frame_entry["time_origin"] = origin
     return ev(EventType.DOM_FORMS,
-              {"page_id": page, "url": frame_url,
-               "frames": [{"frame_url": frame_url, "frame_id": frame, "forms": forms}]},
-              source=Source.ENGINE, page=page, frame=frame)
+              {"page_id": page, "url": frame_url, "frames": [frame_entry]},
+              source=Source.ENGINE, page=page, frame=frame, frame_url=frame_url)
+
+
+def radio_change(name, value, label, *, page, frame, form="f", origin=None):
+    return ev(EventType.USER_CHANGE,
+              {"value": {"checked": True, "value": value},
+               "element": {"tag": "input", "type": "radio", "id": None,
+                           "name": name, "label": label, "form": form}},
+              page=page, frame=frame, origin=origin)
 
 
 def request(path, *, page, frame, method="POST"):
@@ -240,6 +255,191 @@ def test_a_formless_combobox_is_grouped_by_a_captured_region_not_the_frame():
     # The region, not the whole frame, is in the key.
     assert "region:filters" in entry.form_key
     assert "@formless@" not in entry.form_key
+
+
+# --- document-instance identity ------------------------------------------
+
+def _named_form(form_id, path="body > form"):
+    return {"index": 0, "id": form_id, "path": path, "action": "/x", "method": "POST",
+            "fields": [{"tag": "input", "type": "text", "id": "field", "name": "field"}]}
+
+
+def test_two_same_id_forms_across_a_same_frame_navigation_do_not_merge():
+    """/claims/new form1, then navigate the SAME page/frame to /customers/new
+    form1. A full navigation is a NEW document instance (a new time origin), so
+    the two forms must stay separate even though page, frame and id all match."""
+    _reset()
+    forms = _catalog([
+        dom_forms([_named_form("form1")], page="p1", frame="f1",
+                  frame_url="http://h/claims/new", origin=1000),
+        dom_forms([_named_form("form1")], page="p1", frame="f1",
+                  frame_url="http://h/customers/new", origin=2000),
+    ])
+    assert len(forms) == 2, [f.form_key for f in forms]
+
+
+def test_same_id_form_in_two_documents_at_one_route_stays_separate():
+    """A reload of the same route is a new document instance too: same page,
+    frame, route and id, but a different time origin keeps them separate."""
+    _reset()
+    forms = _catalog([
+        dom_forms([_named_form("form1")], page="p1", frame="f1",
+                  frame_url="http://h/claims/new", origin=1000),
+        dom_forms([_named_form("form1")], page="p1", frame="f1",
+                  frame_url="http://h/claims/new", origin=2000),
+    ])
+    assert len(forms) == 2, [f.form_key for f in forms]
+
+
+def test_same_id_form_across_two_spa_routes_stays_separate():
+    """An SPA route change is NOT a new document (same time origin), so document
+    instance alone cannot separate them -- the route does. Forms are grouped by
+    occurrence: (page, frame, document instance, route, form identity)."""
+    _reset()
+    forms = _catalog([
+        dom_forms([_named_form("form1")], page="p1", frame="f1",
+                  frame_url="http://h/claims/new", origin=1000),
+        dom_forms([_named_form("form1")], page="p1", frame="f1",
+                  frame_url="http://h/customers/new", origin=1000),
+    ])
+    assert len(forms) == 2, [f.form_key for f in forms]
+
+
+def test_named_form_still_merges_within_one_document_and_route():
+    """The other side of the guarantee: repeated observations of the SAME form
+    in one document at one route stay ONE entry."""
+    _reset()
+    forms = _catalog([
+        dom_forms([_named_form("order")], page="p1", frame="f1",
+                  frame_url="http://h/orders/new", origin=1000),
+        dom_forms([_named_form("order")], page="p1", frame="f1",
+                  frame_url="http://h/orders/new", origin=1000),
+    ])
+    assert len(forms) == 1, [f.form_key for f in forms]
+
+
+# --- anonymous form event correlation ------------------------------------
+
+def test_anonymous_inventory_input_and_submit_merge_into_one_entry():
+    """DOM inventory, an input on a field, and the submit -- all for one
+    anonymous form -- resolve to the SAME key via the form's structural path."""
+    _reset()
+    path = "body > div > form"
+    forms = _catalog([
+        dom_forms([{"index": 0, "id": None, "path": path, "action": "/a",
+                    "method": "POST",
+                    "fields": [{"tag": "input", "type": "text", "id": None,
+                                "name": "note", "label": "Note"}]}],
+                  page="p1", frame="f1", frame_url="http://h/wizard", origin=7),
+        ev(EventType.USER_INPUT,
+           {"value": {"value": "hello"},
+            "element": {"tag": "input", "type": "text", "name": "note",
+                        "form": "(unnamed)", "form_path": path}},
+           page="p1", frame="f1", frame_url="http://h/wizard", origin=7),
+        submit(None, page="p1", frame="f1", dom_path=path,
+               frame_url="http://h/wizard", origin=7),
+    ])
+    assert len(forms) == 1, [f.form_key for f in forms]
+    note = next(c for c in forms[0].controls if c.name == "note")
+    assert note.final_value == "hello"
+    assert forms[0].submitted is True
+
+
+def test_two_anonymous_forms_stay_separate_via_input_paths():
+    """Two anonymous forms in one document, each with an input, stay separate --
+    the owning-form path in the input fingerprint distinguishes them."""
+    _reset()
+    p1 = "body > form:nth-of-type(1)"
+    p2 = "body > form:nth-of-type(2)"
+    forms = _catalog([
+        ev(EventType.USER_INPUT,
+           {"value": {"value": "one"},
+            "element": {"tag": "input", "name": "a", "form": "(unnamed)",
+                        "form_path": p1}}, page="p1", frame="f1", origin=1),
+        ev(EventType.USER_INPUT,
+           {"value": {"value": "two"},
+            "element": {"tag": "input", "name": "b", "form": "(unnamed)",
+                        "form_path": p2}}, page="p1", frame="f1", origin=1),
+    ])
+    assert len(forms) == 2, [f.form_key for f in forms]
+
+
+# --- radio groups and repeated-name checkboxes ---------------------------
+
+def test_two_idless_radios_sharing_a_name_are_one_group_with_options():
+    _reset()
+    forms = _catalog([dom_forms([
+        {"index": 0, "id": "plan-form", "path": "body > form", "action": "/p",
+         "method": "POST", "fields": [
+            {"tag": "input", "type": "radio", "id": None, "name": "plan",
+             "value": "basic", "label": "Basic", "checked": False},
+            {"tag": "input", "type": "radio", "id": None, "name": "plan",
+             "value": "pro", "label": "Pro", "checked": True},
+        ]}], page="p1", frame="f1", origin=1)])
+    radios = [c for c in forms[0].controls if c.type == "radio"]
+    assert len(radios) == 1, "a radio group must be one logical control"
+    grp = radios[0]
+    assert grp.kind == "radio_group"
+    assert {o["value"] for o in grp.options} == {"basic", "pro"}
+    assert grp.selected_label == "Pro"
+    assert grp.final_value == "pro"
+
+
+def test_idless_checkboxes_sharing_a_name_stay_distinct():
+    _reset()
+    forms = _catalog([dom_forms([
+        {"index": 0, "id": "topping-form", "path": "body > form", "action": "/t",
+         "method": "POST", "fields": [
+            {"tag": "input", "type": "checkbox", "id": None, "name": "topping",
+             "value": "cheese", "label": "Cheese", "checked": True},
+            {"tag": "input", "type": "checkbox", "id": None, "name": "topping",
+             "value": "olives", "label": "Olives", "checked": False},
+            {"tag": "input", "type": "checkbox", "id": None, "name": "topping",
+             "value": "ham", "label": "Ham", "checked": True},
+        ]}], page="p1", frame="f1", origin=1)])
+    boxes = [c for c in forms[0].controls if c.type == "checkbox"]
+    assert len(boxes) == 3, "checkboxes sharing a name must stay distinct choices"
+    checked = {c.option_value for c in boxes if c.checked}
+    assert checked == {"cheese", "ham"}
+
+
+def test_a_single_named_checkbox_stays_one_control():
+    """Preserve normal single-checkbox behaviour."""
+    _reset()
+    forms = _catalog([dom_forms([
+        {"index": 0, "id": "consent-form", "path": "body > form", "action": "/c",
+         "method": "POST", "fields": [
+            {"tag": "input", "type": "checkbox", "id": "agree", "name": "agree",
+             "value": "yes", "label": "I agree", "checked": True},
+        ]}], page="p1", frame="f1", origin=1)])
+    boxes = [c for c in forms[0].controls if c.type == "checkbox"]
+    assert len(boxes) == 1
+    assert boxes[0].checked is True
+
+
+def test_radio_group_reflects_the_last_selected_option_over_time():
+    _reset()
+    forms = _catalog([
+        dom_forms([{"index": 0, "id": "plan-form", "path": "body > form",
+                    "action": "/p", "method": "POST", "fields": [
+            {"tag": "input", "type": "radio", "id": None, "name": "plan",
+             "value": "basic", "label": "Basic", "checked": True},
+            {"tag": "input", "type": "radio", "id": None, "name": "plan",
+             "value": "pro", "label": "Pro", "checked": False},
+        ]}], page="p1", frame="f1", origin=1),
+        radio_change("plan", "pro", "Pro", page="p1", frame="f1",
+                     form="plan-form", origin=1),
+        radio_change("plan", "basic", "Basic", page="p1", frame="f1",
+                     form="plan-form", origin=1),
+        radio_change("plan", "pro", "Pro", page="p1", frame="f1",
+                     form="plan-form", origin=1),
+    ])
+    grp = next(c for c in forms[0].controls if c.type == "radio")
+    assert grp.final_value == "pro"
+    assert grp.selected_label == "Pro"
+    assert {o["value"] for o in grp.options} == {"basic", "pro"}
+    # Exactly one option is marked selected at the end.
+    assert [o["value"] for o in grp.options if o.get("checked")] == ["pro"]
 
 
 def test_outcome_is_left_uncorrelated_when_identity_is_insufficient():

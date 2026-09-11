@@ -51,13 +51,16 @@ class FormControl:
     tag: str
     type: str | None = None
     role: str | None = None
-    kind: str = "native"            # "native" | "combobox"
+    kind: str = "native"            # "native" | "combobox" | "radio_group"
     label: str | None = None
     placeholder: str | None = None
     required: bool = False
     disabled: bool = False
     readonly: bool = False
     checked: bool | None = None
+    # For one checkbox out of a group sharing a name, the value that identifies
+    # this choice (so several same-named checkboxes stay distinct).
+    option_value: str | None = None
     selected_label: str | None = None
     options: list[dict[str, Any]] = field(default_factory=list)
     # True only when the full option set was inventoried (a native select in a
@@ -75,10 +78,15 @@ class FormControl:
 class FormCatalogEntry:
     """One form the operator used, assembled from every observation of it.
 
-    Identity is unique across the whole session: `form_key` combines the page,
-    the frame/document, and the form (its id/name, or -- for an anonymous form
-    -- its index and structural path). Two tabs each showing `id="form1"`, and
-    two anonymous forms in one frame, are therefore distinct entries.
+    Identity is unique across the whole session. `form_key` names one form
+    OCCURRENCE: page, frame, document instance, route, and the form (its
+    id/name, or -- anonymous -- its structural path). A frame id survives a
+    navigation, so it alone cannot separate two documents loaded in one frame;
+    the document instance (a per-load `performance.timeOrigin`) does. An SPA
+    route change is not a new document, so the route separates two same-id forms
+    shown at different SPA routes within one document instance. Two tabs each
+    showing `id="form1"`, a form before and after a navigation, and two
+    anonymous forms in one document are therefore all distinct entries.
     """
 
     form_key: str
@@ -86,6 +94,9 @@ class FormCatalogEntry:
     frame_id: str | None
     page_id: str | None = None
     frame_url: str | None = None
+    # The document instance (dN) and route this occurrence was observed in.
+    document_instance: str | None = None
+    route: str | None = None
     action: str | None = None
     method: str | None = None
     controls: list[FormControl] = field(default_factory=list)
@@ -102,6 +113,8 @@ class FormCatalogAnalyzer:
         ordered = sorted(events, key=lambda e: e.seq)
         self._forms: dict[str, FormCatalogEntry] = {}
         self._controls: dict[str, dict[str, FormControl]] = {}
+        # (page, frame, normalized time origin) -> a session-local document id.
+        self._doc_ids: dict[tuple, str] = {}
 
         # 1. Seed from every DOM scan: all visible controls, full option sets.
         for event in ordered:
@@ -132,43 +145,123 @@ class FormCatalogAnalyzer:
     def _identity(form_id: str | None, index=None, path: str | None = None) -> str:
         """The form half of the key, within a document.
 
-        A real id/name identifies the form. Without one, the form's index in the
-        document plus its structural path do -- so two anonymous forms in one
-        frame stay distinct. `(unnamed)` is the probe's placeholder for "no id",
-        so it is treated as absent.
+        A real id/name identifies the form. Without one, its structural path
+        does -- the DOM scan, an input/change on one of its fields, and its
+        submit all carry the same path, so they merge, while two anonymous forms
+        (distinct paths) stay separate. The document index is only a last resort.
+        `(unnamed)` is the probe's placeholder for "no id", treated as absent.
         """
         if form_id and form_id != "(unnamed)":
             return f"id:{form_id}"
-        if index is not None:
-            return f"idx:{index}" + (f"@{path}" if path else "")
         if path:
             return f"path:{path}"
+        if index is not None:
+            return f"idx:{index}"
         return "anon"
 
+    def _doc_instance(self, page_id, frame_id, origin) -> str | None:
+        """A session-local document id (dN) for one loaded document.
+
+        `performance.timeOrigin` is stamped on every DOM scan and every runtime
+        event of a document and changes on each full navigation, so it is the
+        identity of a document INSTANCE. It is normalised to an integer so the
+        scan and the runtime probe -- which read the same clock -- agree.
+        """
+        if origin is None:
+            return None
+        try:
+            norm = int(round(float(origin)))
+        except (TypeError, ValueError):
+            return None
+        k = (page_id, frame_id, norm)
+        assigned = self._doc_ids.get(k)
+        if assigned is None:
+            assigned = f"d{len(self._doc_ids) + 1}"
+            self._doc_ids[k] = assigned
+        return assigned
+
     @staticmethod
-    def _key(page_id, frame_id, identity: str) -> str:
-        # Page AND frame/document: frame ids are session-unique, and the page id
-        # keeps two frames that could not be told apart still separate.
-        return f"{page_id or '?'}::{frame_id or '?'}::{identity}"
+    def _route(frame_url) -> str | None:
+        if not frame_url:
+            return None
+        try:
+            return route_shape(str(frame_url))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _key(page_id, frame_id, identity: str, doc=None, route=None) -> str:
+        # An occurrence: page, frame, document instance, route, form identity.
+        # doc/route are appended only when known, so an observation carrying no
+        # document clock still keys deterministically by page/frame/identity.
+        parts = [page_id or "?", frame_id or "?"]
+        if doc:
+            parts.append(doc)
+        if route:
+            parts.append(f"@{route}")
+        parts.append(identity)
+        return "::".join(parts)
+
+    @staticmethod
+    def _control_key(*, type_, name, cid, value, path=None) -> str | None:
+        """A control's identity within a form.
+
+        Name alone is NOT the identity: a radio group and a multi-checkbox group
+        both share one name across several controls. A radio group is one
+        logical control (keyed by its name); each checkbox in a same-named group
+        is a distinct choice (keyed by name AND value). Otherwise an id, then a
+        name, then -- for a control with neither -- its structural path.
+        """
+        t = (type_ or "").lower()
+        if t == "radio" and name:
+            return f"radio:{name}"
+        if t == "checkbox" and name:
+            return f"checkbox:{name}={value if value is not None else ''}"
+        if cid:
+            return f"id:{cid}"
+        if name:
+            return f"name:{name}"
+        if path:
+            return f"path:{path}"
+        return None
 
     def _entry(self, key: str, form_id: str | None, page_id, frame_id,
-               frame_url=None) -> FormCatalogEntry:
+               frame_url=None, doc=None, route=None) -> FormCatalogEntry:
         entry = self._forms.get(key)
         if entry is None:
             entry = FormCatalogEntry(
                 form_key=key,
                 form_id=form_id if form_id and form_id != "(unnamed)" else None,
-                page_id=page_id, frame_id=frame_id, frame_url=frame_url)
+                page_id=page_id, frame_id=frame_id, frame_url=frame_url,
+                document_instance=doc, route=route)
             self._forms[key] = entry
             self._controls[key] = {}
         return entry
 
-    def _control(self, key: str, name: str, tag: str) -> FormControl:
-        control = self._controls[key].get(name)
+    def _control(self, key: str, control_key: str, name: str, tag: str) -> FormControl:
+        control = self._controls[key].get(control_key)
         if control is None:
             control = FormControl(name=name, tag=tag)
-            self._controls[key][name] = control
+            self._controls[key][control_key] = control
         return control
+
+    @staticmethod
+    def _radio_option(control: FormControl, value, label, checked: bool) -> None:
+        """Record one radio option on its group control; a checked one becomes
+        the exclusive selection, so switching over time reflects the last."""
+        control.type = "radio"
+        control.kind = "radio_group"
+        opt = next((o for o in control.options if o.get("value") == value), None)
+        if opt is None:
+            opt = {"value": value, "text": label, "checked": False}
+            control.options.append(opt)
+        elif label and not opt.get("text"):
+            opt["text"] = label
+        if checked:
+            for o in control.options:
+                o["checked"] = (o.get("value") == value)
+            control.selected_label = label or opt.get("text") or value
+            control.final_value = value
 
     # -- 1. DOM scan seed --------------------------------------------------
     def _seed_from_dom(self, event: Event) -> None:
@@ -178,11 +271,14 @@ class FormCatalogAnalyzer:
             # Per-frame id when the scan recorded it, so forms in different
             # frames of one page do not collide; fall back to the event's frame.
             frame_id = frame.get("frame_id") or event.frame_id
+            route = self._route(frame_url)
+            doc = self._doc_instance(page_id, frame_id, frame.get("time_origin"))
             for form in frame.get("forms") or []:
                 form_id = form.get("id") or form.get("name")
                 identity = self._identity(form_id, form.get("index"), form.get("path"))
-                key = self._key(page_id, frame_id, identity)
-                entry = self._entry(key, form_id, page_id, frame_id, frame_url)
+                key = self._key(page_id, frame_id, identity, doc, route)
+                entry = self._entry(key, form_id, page_id, frame_id, frame_url,
+                                    doc, route)
                 entry.evidence.cite(event.event_id)
                 entry.action = form.get("action") or entry.action
                 entry.method = (form.get("method") or entry.method or "GET")
@@ -190,20 +286,39 @@ class FormCatalogAnalyzer:
                     self._seed_control(key, f)
 
     def _seed_control(self, key: str, f: dict) -> None:
-        name = f.get("id") or f.get("name")
-        if not name:
+        name = f.get("name")
+        cid = f.get("id")
+        type_ = f.get("type")
+        tag = str(f.get("tag") or "input")
+        value = f.get("value")
+        ck = self._control_key(type_=type_, name=name, cid=cid, value=value,
+                               path=f.get("path"))
+        if ck is None:
             return
-        control = self._control(key, str(name), str(f.get("tag") or "input"))
-        control.type = f.get("type") or control.type
+        if (type_ or "").lower() == "radio":
+            control = self._control(key, ck, str(name), tag)
+            self._radio_option(control, value, f.get("label"), bool(f.get("checked")))
+            return
+
+        control = self._control(key, ck, str(cid or name), tag)
+        control.type = type_ or control.type
         control.label = f.get("label") or control.label
         control.placeholder = f.get("placeholder") or control.placeholder
         control.required = bool(f.get("required")) or control.required
         control.disabled = bool(f.get("disabled")) or control.disabled
         control.readonly = bool(f.get("readonly")) or control.readonly
-        if "checked" in f:
-            control.checked = bool(f.get("checked"))
         if f.get("secret"):
             control.secret = True
+        if (type_ or "").lower() == "checkbox":
+            # One choice out of a possibly-repeated name: keep its value and
+            # checked state, distinct from any sibling sharing the name.
+            if isinstance(value, str):
+                control.option_value = value
+            if "checked" in f:
+                control.checked = bool(f.get("checked"))
+            return
+        if "checked" in f:
+            control.checked = bool(f.get("checked"))
         options = f.get("options")
         if isinstance(options, list) and options:
             # A DOM scan sees the WHOLE option set.
@@ -213,7 +328,6 @@ class FormCatalogAnalyzer:
             for o in options:
                 if o.get("selected"):
                     control.selected_label = o.get("text")
-        value = f.get("value")
         # The current value at scan time; a later user event overrides it.
         if isinstance(value, str) and value and control.final_value is None:
             control.final_value = value
@@ -222,27 +336,51 @@ class FormCatalogAnalyzer:
     def _merge_value(self, event: Event) -> None:
         element = event.payload.get("element") or {}
         form_id = element.get("form")
-        name = element.get("id") or element.get("name")
-        if not name:
+        # The owning form's structural path, captured on the input/change event
+        # too (not only on submit), so a field of an ANONYMOUS form resolves to
+        # the same key its DOM inventory and its submit do.
+        form_path = element.get("form_path")
+        name = element.get("name")
+        cid = element.get("id")
+        type_ = element.get("type")
+        tag = str(element.get("tag") or "input")
+        value = event.payload.get("value") or {}
+        opt_value = value.get("value") if isinstance(value.get("value"), str) else None
+        ck = self._control_key(type_=type_, name=name, cid=cid, value=opt_value,
+                               path=element.get("dom_path"))
+        if ck is None:
             return
-        identity = self._identity(form_id)
-        key = self._key(event.page_id, event.frame_id, identity)
+        identity = self._identity(form_id, path=form_path)
+        route = self._route(event.payload.get("frame_url"))
+        doc = self._doc_instance(event.page_id, event.frame_id,
+                                 event.payload.get("probe_time_origin"))
+        key = self._key(event.page_id, event.frame_id, identity, doc, route)
         entry = self._entry(key, form_id, event.page_id, event.frame_id,
-                            event.payload.get("frame_url"))
+                            event.payload.get("frame_url"), doc, route)
         entry.evidence.cite(event.event_id)
 
-        control = self._control(key, str(name), str(element.get("tag") or "input"))
-        control.type = element.get("type") or control.type
+        if (type_ or "").lower() == "radio":
+            control = self._control(key, ck, str(name), tag)
+            self._radio_option(control, opt_value, element.get("label"),
+                               bool(value.get("checked")))
+            return
+
+        control = self._control(key, ck, str(cid or name), tag)
+        control.type = type_ or control.type
         control.label = element.get("label") or control.label
         control.placeholder = element.get("placeholder") or control.placeholder
         control.required = bool(element.get("required")) or control.required
         control.disabled = bool(element.get("disabled")) or control.disabled
         control.readonly = bool(element.get("readonly")) or control.readonly
 
-        value = event.payload.get("value") or {}
         if value.get("redacted"):
             control.secret = True
             control.final_value = None
+            return
+        if (type_ or "").lower() == "checkbox":
+            if opt_value is not None:
+                control.option_value = opt_value
+            control.checked = bool(value.get("checked"))
             return
         if "checked" in value:
             control.checked = bool(value.get("checked"))
@@ -264,26 +402,46 @@ class FormCatalogAnalyzer:
         if not form_id and not dom_path:
             return
         identity = self._identity(form_id, path=dom_path)
-        key = self._key(event.page_id, event.frame_id, identity)
+        route = self._route(event.payload.get("frame_url"))
+        doc = self._doc_instance(event.page_id, event.frame_id,
+                                 event.payload.get("probe_time_origin"))
+        key = self._key(event.page_id, event.frame_id, identity, doc, route)
         entry = self._entry(key, form_id, event.page_id, event.frame_id,
-                            event.payload.get("frame_url"))
+                            event.payload.get("frame_url"), doc, route)
         entry.evidence.cite(event.event_id)
         entry.submitted = True
         entry.action = event.payload.get("action") or entry.action
         entry.method = event.payload.get("method") or entry.method or "GET"
 
         for f in event.payload.get("fields") or []:
-            fname = f.get("name") or f.get("id")
-            if not fname:
-                continue
-            control = self._control(key, str(fname), str(f.get("tag") or "input"))
-            fvalue = f.get("value") or {}
-            if fvalue.get("redacted"):
-                control.secret = True
-            elif isinstance(fvalue.get("value"), str) and control.final_value is None:
-                control.final_value = fvalue["value"]
+            self._merge_submit_field(key, f)
 
         self._correlate(entry, event, ordered)
+
+    def _merge_submit_field(self, key: str, f: dict) -> None:
+        if not (f.get("name") or f.get("id")):
+            return
+        type_ = f.get("type")
+        tag = str(f.get("tag") or "input")
+        fvalue = f.get("value") or {}
+        opt_value = fvalue.get("value") if isinstance(fvalue.get("value"), str) else None
+        ck = self._control_key(type_=type_, name=f.get("name"), cid=f.get("id"),
+                               value=opt_value)
+        if ck is None:
+            return
+        if (type_ or "").lower() == "radio":
+            control = self._control(key, ck, str(f.get("name")), tag)
+            self._radio_option(control, opt_value, None, bool(fvalue.get("checked")))
+            return
+        control = self._control(key, ck, str(f.get("id") or f.get("name")), tag)
+        if fvalue.get("redacted"):
+            control.secret = True
+        elif (type_ or "").lower() == "checkbox":
+            if opt_value is not None:
+                control.option_value = opt_value
+            control.checked = bool(fvalue.get("checked"))
+        elif isinstance(fvalue.get("value"), str) and control.final_value is None:
+            control.final_value = fvalue["value"]
 
     def _correlate(self, entry, submit_event, ordered) -> None:
         """Correlate submit -> request -> response/navigation, WITHIN the
@@ -395,6 +553,9 @@ class FormCatalogAnalyzer:
                     "event": event, "element": element,
                     "controls": aria.get("aria-controls"),
                     "region": self._region_identity(element),
+                    "route": self._route(event.payload.get("frame_url")),
+                    "doc": self._doc_instance(event.page_id, event.frame_id,
+                                              event.payload.get("probe_time_origin")),
                     "name": str(element.get("id") or element.get("label")
                                 or aria.get("aria-controls") or "combobox"),
                 }
@@ -414,14 +575,17 @@ class FormCatalogAnalyzer:
                 exact = bool(controls) and controls == opt_listbox
                 connection = "aria-controls" if exact else "proximity_same_frame"
 
-                key = self._key(event.page_id, event.frame_id, trig["region"])
+                key = self._key(event.page_id, event.frame_id, trig["region"],
+                                trig["doc"], trig["route"])
                 entry = self._entry(
                     key,
                     trig["element"].get("form")
                     if trig["element"].get("form") not in (None, "(unnamed)") else None,
-                    event.page_id, event.frame_id, event.payload.get("frame_url"))
+                    event.page_id, event.frame_id, event.payload.get("frame_url"),
+                    trig["doc"], trig["route"])
                 entry.evidence.cite(trig["event"].event_id, event.event_id)
-                control = self._control(key, trig["name"],
+                control = self._control(key, f"combobox:{trig['name']}",
+                                        trig["name"],
                                         str(trig["element"].get("tag") or "div"))
                 control.kind = "combobox"
                 control.role = "combobox"
