@@ -472,7 +472,7 @@
       // The listbox an option belongs to, so a combobox trigger's aria-controls
       // can be matched to the exact listbox the chosen option came from --
       // across a portal, where the listbox is not a DOM ancestor of the trigger.
-      if (role === "option" && el.closest) {
+      if (fp.role === "option" && el.closest) {
         const list = el.closest("[role=listbox]");
         if (list && list.id) fp.listbox = list.id;
       }

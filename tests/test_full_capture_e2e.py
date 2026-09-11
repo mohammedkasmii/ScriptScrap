@@ -176,7 +176,14 @@ def test_the_analysis_reflects_the_agency_workflow(capture_dir):
     all_controls = [c for f in result.forms for c in f.controls]
     assert any(c.tag == "select" and c.options_complete for c in all_controls), \
         "no native select with a complete option set"
-    assert any(c.kind == "combobox" for c in all_controls), "no ARIA combobox"
+    combo = next((c for c in all_controls if c.kind == "combobox"), None)
+    assert combo is not None, "no ARIA combobox"
+    # The option the operator clicked carries its owning listbox id, so the
+    # trigger's aria-controls matches it EXACTLY -- not a same-frame proximity
+    # guess. (Regression: the probe once dropped the option's listbox id, which
+    # forced every combobox onto the proximity fallback.)
+    assert combo.listbox == "agent-list", combo.listbox
+    assert combo.connection == "aria-controls", combo.connection
     # Tables: the static table and the virtualized one, the latter with more
     # rows than one window.
     assert result.tables, "no tables catalogued"
