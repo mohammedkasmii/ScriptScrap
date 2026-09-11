@@ -24,6 +24,7 @@ from ..probe import (
     DRAIN_FUNCTION,
     PATCH_MARKER,
     build_init_script,
+    build_isolated_reinstall_script,
     build_main_world_script,
 )
 from .identity import PageRegistry
@@ -161,6 +162,23 @@ class RuntimeSensor:
                           "bind; the APIs they wrap will not be observed"),
                 )
         return marker if isinstance(marker, dict) else None
+
+    async def rearm_isolated(self, frame: Any) -> bool:
+        """Re-attach the isolated-world listeners in a frame's live document.
+
+        For a popup or a new tab, Camoufox's context-level init script defines
+        the probe's globals but its listeners never fire (verified: a manual
+        isolated listener catches a fill there, the probe's own does not).
+        Re-evaluating the isolated probe into the live document attaches working
+        listeners. Idempotent per document -- each navigation is a fresh
+        document, so exactly one probe attaches. Best effort: a frame that has
+        already navigated away is not worth a sensor error.
+        """
+        try:
+            await frame.evaluate(build_isolated_reinstall_script(self.config))
+            return True
+        except Exception:
+            return False
 
     async def verify_main_world(self, frame: Any) -> dict[str, Any]:
         """Read the patch marker back from the page. The runtime self-test.

@@ -671,9 +671,15 @@ class WebHarvester:
             )
             return
 
+        # Reserve the step number immediately. With a scanner per page, two
+        # pages can snapshot concurrently; reading the counter and incrementing
+        # it in one go (no await between) keeps their filenames from colliding.
+        step = self.step_counter
+        self.step_counter += 1
+        page_id = self.registry.page_id(page) if self.registry else None
         timestamp = datetime.now().strftime("%H%M%S")
-        file_prefix = self.visual_dir / f"step_{self.step_counter:03d}_{timestamp}"
-        
+        file_prefix = self.visual_dir / f"step_{step:03d}_{timestamp}"
+
         try:
             # 1. Screenshot.
             #    caret="initial" is required for non-destructiveness: Playwright's
@@ -702,15 +708,17 @@ class WebHarvester:
             self.emit_event(
                 EV.Source.ENGINE,
                 EV.EventType.SCREENSHOT,
+                page_id=page_id,
                 url=page.url,
-                step=self.step_counter,
+                step=step,
                 artifact=Path(f"{file_prefix}.png").name,
             )
             self.emit_event(
                 EV.Source.ENGINE,
                 EV.EventType.HTML_SNAPSHOT,
+                page_id=page_id,
                 url=page.url,
-                step=self.step_counter,
+                step=step,
                 artifact=Path(f"{file_prefix}.html").name,
                 bytes=len(result["html"]),
                 **report,
@@ -722,8 +730,6 @@ class WebHarvester:
                     count=report["sheets_not_readable"],
                     note="cross-origin sheet; <link> retained, snapshot is partial",
                 )
-
-            self.step_counter += 1
 
         except Exception as exc:
             # Transient failures are expected when the page navigates mid-capture,
@@ -1421,6 +1427,10 @@ async def attach_engine_to_page(page, engine):
     window the application opens is observed on the same footing as this page.
     """
     context = page.context
+    # The page the operator started on. Its context-level init script installs
+    # the isolated probe listeners correctly; a popup or new tab's do NOT (a
+    # Camoufox quirk), so those are re-armed per navigation below.
+    engine._initial_page = page
 
     # Legacy named-function hooks. Their parse-time blind spot is documented in
     # the session manifest and is deliberately NOT solved here; source rewriting
@@ -1466,6 +1476,18 @@ async def attach_engine_to_page(page, engine):
             # The legacy hooks need the same world for the same reason.
             with contextlib.suppress(Exception):
                 await frame.evaluate("mw:" + HOOK_AND_OBSERVER_JS)
+            # Isolated-world listeners from the context init script do not fire
+            # in a popup or new tab. Re-arm them in the live document of every
+            # NON-initial page's main frame. The initial page is skipped: its
+            # context-script listeners work, and re-arming there would attach a
+            # second set and double every user action.
+            try:
+                is_main_frame = frame.parent_frame is None
+                owner_page = frame.page
+            except Exception:
+                return
+            if is_main_frame and owner_page is not getattr(engine, "_initial_page", None):
+                await engine.runtime_sensor.rearm_isolated(frame)
 
         def on_navigated(frame) -> None:
             asyncio.get_running_loop().create_task(install_main_world(frame))
@@ -1490,17 +1512,10 @@ async def background_dom_scanner(page, engine):
     """
     last_hash = ""
     last_url = None
-    last_checkpoint = datetime.now(UTC)
-    checkpoint_interval = 30.0     # seconds between heartbeat recovery points
     await engine.capture_visual_state(page)
-    engine.checkpoint(reason="session_start")
     while True:
         await asyncio.sleep(2.0)
         try:
-            now = datetime.now(UTC)
-            if (now - last_checkpoint).total_seconds() >= checkpoint_interval:
-                last_checkpoint = now
-                engine.checkpoint(reason="periodic")
             current_url = page.url
             content = await page.content()
             # Change-detection only. Not a security primitive.
@@ -1521,6 +1536,119 @@ async def background_dom_scanner(page, engine):
             # The scanner is the only thing driving periodic capture. If it keeps
             # failing, the session looks quiet when it is actually unobserved.
             engine.emit_sensor_error("background_dom_scanner", exc)
+
+class PageCoverage:
+    """Full capture coverage for every in-scope page, tab and popup.
+
+    Each page an application opens is worked exactly like the first: its own
+    scanner task (visual snapshots, DOM/form inventory, storage snapshots on
+    change) plus the context-level sensors and per-navigation main-world
+    instrumentation that `attach_engine_to_page` already wires for every page.
+    A page's scanner is cancelled AND awaited when the page closes, so a closing
+    popup cannot leave a task scanning a dead page. On session end every
+    remaining in-scope page is drained and its final state extracted -- not only
+    the page the operator started on, which was the previous behaviour and lost
+    everything a popup held.
+
+    The checkpoint heartbeat is session-level here, not per page, so a session
+    with three tabs open does not write three times the checkpoints.
+    """
+
+    def __init__(self, engine, *, checkpoint_interval: float = 30.0):
+        self.engine = engine
+        self.checkpoint_interval = checkpoint_interval
+        self.tasks: dict = {}          # page -> scanner Task
+        self.pages: list = []          # order of appearance, for a stable drain
+        self._observed: set = set()    # guard: observe each page exactly once
+        self._closing: list = []       # cancel-and-await tasks for closed pages
+        self._checkpoint_task = None
+
+    def start(self, context, initial_page) -> None:
+        self._observe(initial_page)
+        # One context subscription. Duplicate coverage of a page is guarded by
+        # `_observed`, so even if the initial page also arrives via this event
+        # it is not scanned twice.
+        context.on("page", self._observe)
+        self.engine.checkpoint(reason="session_start")
+        self._checkpoint_task = asyncio.get_running_loop().create_task(
+            self._checkpoint_loop())
+
+    def _observe(self, page) -> None:
+        if page in self._observed:
+            return
+        self._observed.add(page)
+        self.pages.append(page)
+        page.on("close", lambda p=page: self._on_close(p))
+        loop = asyncio.get_running_loop()
+        self.tasks[page] = loop.create_task(background_dom_scanner(page, self.engine))
+        # A popup or new tab's isolated-world listeners from the context init
+        # script do not fire, so re-arm them once the page has loaded. The
+        # per-navigation re-arm handles its later documents; this handles the
+        # first one robustly, independent of when the framenavigated listener
+        # was attached.
+        if page is not getattr(self.engine, "_initial_page", None):
+            self._closing.append(loop.create_task(self._rearm_when_ready(page)))
+
+    async def _rearm_when_ready(self, page) -> None:
+        if self.engine.runtime_sensor is None:
+            return
+        with contextlib.suppress(Exception):
+            await page.wait_for_load_state("load")
+        with contextlib.suppress(Exception):
+            if self.engine.scope.contains(getattr(page, "url", "") or ""):
+                await self.engine.runtime_sensor.rearm_isolated(page.main_frame)
+
+    def _on_close(self, page) -> None:
+        task = self.tasks.pop(page, None)
+        if task is None:
+            return
+        # Cancel now; await on a helper task, because this runs in a sync event
+        # callback where we cannot await. stop() also awaits it, so nothing is
+        # left dangling at session end.
+        task.cancel()
+        self._closing.append(asyncio.get_running_loop().create_task(
+            self._await_cancelled(task)))
+
+    @staticmethod
+    async def _await_cancelled(task) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _checkpoint_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.checkpoint_interval)
+                self.engine.checkpoint(reason="periodic")
+        except asyncio.CancelledError:
+            raise
+
+    async def stop(self) -> None:
+        """Cancel every scanner, then drain and extract every in-scope page."""
+        if self._checkpoint_task is not None:
+            self._checkpoint_task.cancel()
+            await self._await_cancelled(self._checkpoint_task)
+
+        for task in list(self.tasks.values()):
+            task.cancel()
+        for task in list(self.tasks.values()):
+            await self._await_cancelled(task)
+        for task in self._closing:
+            await self._await_cancelled(task)
+        self.tasks.clear()
+
+        # Drain and extract EVERY remaining in-scope page, in order of
+        # appearance. A popup the operator filled and left open is emptied here.
+        for page in self.pages:
+            with contextlib.suppress(Exception):
+                if page.is_closed():
+                    continue
+            if not self.engine.scope.contains(getattr(page, "url", "") or ""):
+                continue
+            try:
+                await self.engine.extract_active_introspection(page)
+            except Exception as exc:
+                self.engine.emit_sensor_error("page_coverage_drain", exc)
+
 
 def _configure_stdout():
     """Keep the emoji status output from killing the run on a cp1252 console.
@@ -1728,7 +1856,10 @@ async def main(argv=None):
             print(f"🚀 Infiltrating {target_url}...")
             await page.goto(target_url, wait_until="load")
 
-            scanner_task = asyncio.create_task(background_dom_scanner(page, engine))
+            # Full coverage for every page/tab/popup the employee opens, not
+            # only this one: a scanner per page, and drain-all on session end.
+            coverage = PageCoverage(engine)
+            coverage.start(page.context, page)
 
             print("\n" + "=" * 60)
             for line in active_session_banner(forensic_config):
@@ -1736,10 +1867,8 @@ async def main(argv=None):
             print("=" * 60 + "\n")
 
             await asyncio.to_thread(input, "")
-            scanner_task.cancel()
-            
-            # Final dump of hidden in-memory state
-            await engine.extract_active_introspection(page)
+            # Cancels every scanner and drains every remaining in-scope page.
+            await coverage.stop()
             engine.outcome = "clean"
 
     except KeyboardInterrupt:
