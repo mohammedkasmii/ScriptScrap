@@ -1,11 +1,11 @@
 {
   "events.jsonl": {
     "by_source": {
-      "engine": 22,
+      "engine": 20,
       "playwright": 58
     },
     "by_type": {
-      "capture_gap": 6,
+      "capture_gap": 4,
       "console_message": 1,
       "dom_forms": 4,
       "dom_mutation": "<BATCHED>",
@@ -54,8 +54,6 @@
         "dom_forms",
         "screenshot",
         "html_snapshot",
-        "capture_gap",
-        "capture_gap",
         "capture_gap",
         "session_end"
       ],
@@ -187,13 +185,26 @@
         "utilisation-log"
       ]
     },
+    "completion": {
+      "checkpoints_written": 0,
+      "clean": true,
+      "last_checkpoint": "<TS>",
+      "note": "Events stream to disk as they happen and are fsynced periodically, so an abrupt kill leaves everything up to the last flush readable. A session killed hard writes no manifest at all; the workspace reports manifest_present: false for that.",
+      "outcome": "clean"
+    },
     "counters": {
+      "capture_gaps": 4,
+      "checkpoints": 0,
       "endpoints_in_scope": 16,
+      "frames": 1,
       "network_events_logged": 19,
       "out_of_scope_endpoints": 0,
+      "pages": 0,
+      "sensor_errors": 0,
       "visual_captures_skipped_out_of_scope": 0,
       "visual_traces": 3
     },
+    "duration_seconds": "<TS>",
     "environment": {
       "browser_build_baseline": "<PINNED>",
       "camoufox_browser_build": "<PINNED>",
@@ -222,7 +233,7 @@
     "known_blind_spots": [
       "Service-worker traffic is invisible to Playwright on Firefox. When a service worker is detected a capture_gap is emitted.",
       "WebSocket handshake headers are not exposed by Playwright, so auth sent on the upgrade is unobserved. Frames themselves ARE captured.",
-      "httpOnly cookie changes are only visible as periodic snapshots, not as a change stream. IndexedDB and Cache Storage are not captured.",
+      "httpOnly cookie changes are only visible as periodic snapshots, not as a change stream. IndexedDB and Cache Storage are INVENTORIED (database/store names with record counts, cached request URLs) but their record values and cached response bodies are not read.",
       "Legacy named-function hooks run on a 2s interval and miss calls made during initial page parse. Proven unsolvable from injected JS; source rewriting is a later, gated capability.",
       "Dropdown catalogs and jQuery events are still read once at exit, from the top frame only, and are destroyed by every full page navigation. User actions, runtime calls and DOM mutations are NOT: those are flushed before navigation by the runtime probe.",
       "NOISY_ENDPOINTS drops matching URLs at capture time; they are not recoverable from this session.",
@@ -291,10 +302,7 @@
         "unknown_types": []
       },
       "storage": {
-        "gaps_reported": [
-          "cache_storage",
-          "indexed_db"
-        ],
+        "gaps_reported": [],
         "snapshots": 1
       },
       "websocket": {

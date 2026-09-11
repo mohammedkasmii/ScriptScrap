@@ -40,6 +40,11 @@ class EventType(StrEnum):
     # Session lifecycle
     SESSION_START = "session_start"
     SESSION_END = "session_end"
+    # A periodic heartbeat during a long session: a recovery point that records
+    # progress (events so far, pages open, elapsed) so an abruptly interrupted
+    # capture still shows how far it got, and a running session can be seen to
+    # be alive rather than merely quiet.
+    CHECKPOINT = "checkpoint"
 
     # Page / frame / navigation
     PAGE_OPENED = "page_opened"

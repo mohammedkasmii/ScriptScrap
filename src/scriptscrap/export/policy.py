@@ -333,9 +333,19 @@ _SENSOR_METRIC_KEYS = frozenset({
     "cookie_events", "frames", "body_capture_rate", "bodies_captured",
     "bodies_skipped", "handshakes", "messages",
 })
+# Derived from what health.py's `_overall` can actually emit, normalised the
+# same way `_health` normalises it (lowercase, non-alphanumerics -> "_"). The
+# earlier set was a guess that never matched the producer -- it happened to
+# contain `partial_high_coverage`, the one phrase every reference capture hit,
+# so a fully-healthy session (all sensors green) failed the export the first
+# time one occurred.
 _OVERALL_CODES = frozenset({
-    "full_coverage", "high_coverage", "partial_high_coverage",
-    "partial_low_coverage", "partial_limited_coverage", "degraded", "unknown",
+    "complete_all_sensors_healthy",
+    "partial_high_coverage",
+    "partial_sensor_blind_spot",
+    "partial_sensor_unavailable",
+    "partial_sensor_blind_spot_sensor_unavailable",
+    "unknown",
 })
 # reconcile.py's relation names, and the sensors an observation can come from.
 _RELATIONS = frozenset({"same_activity", "unmatched", "conflicts_with"})

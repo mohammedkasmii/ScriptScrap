@@ -132,6 +132,10 @@ async def _run(tmp_path):
             await page.click("#btn-submit")
             await page.wait_for_load_state("load")
 
+            # A heartbeat recovery point, as the background scanner emits during
+            # a long session.
+            engine.checkpoint(reason="test")
+
             await engine.extract_active_introspection(page)
 
         engine.close_events()
@@ -499,6 +503,16 @@ def test_failed_request_url_is_the_dead_port(log):
 
 
 # --- capture honesty -----------------------------------------------------
+
+def test_a_checkpoint_records_progress_for_a_long_session(log):
+    """A heartbeat so an interrupted capture shows how far it got."""
+    checkpoints = _payloads(log, EventType.CHECKPOINT)
+    assert checkpoints, "no checkpoint event was written"
+    latest = checkpoints[-1]
+    assert latest["events_so_far"] > 0
+    assert "elapsed_seconds" in latest
+    assert "pages_open" in latest
+
 
 def test_sensor_stats_are_recorded(log):
     end = log.of_type(EventType.SESSION_END)

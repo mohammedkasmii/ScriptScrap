@@ -455,6 +455,13 @@ class WebHarvester:
         # events are the record, and the manifest needs only how many.
         self._http_requests = 0
 
+        # Running tallies for the manifest's completeness block. Counts, not
+        # buffers: a long session must not accumulate the things it counts.
+        self._capture_gaps = 0
+        self._sensor_errors = 0
+        self._checkpoints = 0
+        self._last_checkpoint = None
+
         # Metadata-only record of everything outside the engagement boundary:
         # which endpoints, never what was in them.
         self.out_of_scope_endpoints: set[str] = set()
@@ -534,14 +541,40 @@ class WebHarvester:
 
     def emit_sensor_error(self, where: str, exc: BaseException, **extra):
         """ScriptScrap failed to observe something -- not the same as nothing happening."""
+        self._sensor_errors += 1
         if self.event_log is None:
             return None
         return self.event_log.sensor_error(EV.Source.PLAYWRIGHT, where, exc, **extra)
 
     def emit_capture_gap(self, reason: str, **extra):
+        self._capture_gaps += 1
         if self.event_log is None:
             return None
         return self.event_log.capture_gap(EV.Source.ENGINE, reason, **extra)
+
+    def checkpoint(self, reason: str = "periodic"):
+        """A heartbeat recovery point during a long session.
+
+        Records how far the capture has got -- events so far, pages open,
+        elapsed seconds -- so an abruptly killed session shows its progress and
+        a running one is visibly alive. Cheap: it reads counters, holds nothing.
+        """
+        if self.event_log is None:
+            return None
+        self._checkpoints += 1
+        self._last_checkpoint = datetime.now(UTC)
+        elapsed = (self._last_checkpoint - self.started_at).total_seconds()
+        return self.emit_event(
+            EV.Source.ENGINE,
+            EV.EventType.CHECKPOINT,
+            reason=reason,
+            events_so_far=self.event_log.count,
+            network_events=self._http_requests,
+            capture_gaps=self._capture_gaps,
+            sensor_errors=self._sensor_errors,
+            pages_open=self.registry.snapshot().get("pages") if self.registry else None,
+            elapsed_seconds=round(elapsed, 1),
+        )
 
     def close_events(self):
         if self.event_log is None:
@@ -1184,6 +1217,35 @@ class WebHarvester:
                 "visual_traces": self.step_counter - 1,
                 "out_of_scope_endpoints": len(self.out_of_scope_endpoints),
                 "visual_captures_skipped_out_of_scope": self.skipped_visual_captures,
+                # Page/frame counts and the honesty tallies, so a reader judging
+                # a long session sees its shape without parsing the whole log.
+                "pages": (self.registry.snapshot().get("pages")
+                          if self.registry else None),
+                "frames": (self.registry.snapshot().get("frames")
+                           if self.registry else None),
+                "capture_gaps": self._capture_gaps,
+                "sensor_errors": self._sensor_errors,
+                "checkpoints": self._checkpoints,
+            },
+            # A long agency session runs for hours; a reader needs its shape and
+            # whether it finished cleanly without reading the whole log. Duration
+            # and the completion state make the manifest self-sufficient for that.
+            "duration_seconds": round(
+                (datetime.now(UTC) - self.started_at).total_seconds(), 1),
+            "completion": {
+                "outcome": self.outcome,
+                "clean": self.outcome == "clean",
+                "checkpoints_written": self._checkpoints,
+                "last_checkpoint": (
+                    self._last_checkpoint.isoformat()
+                    if self._last_checkpoint else None),
+                "note": (
+                    "Events stream to disk as they happen and are fsynced "
+                    "periodically, so an abrupt kill leaves everything up to the "
+                    "last flush readable. A session killed hard writes no "
+                    "manifest at all; the workspace reports manifest_present: "
+                    "false for that."
+                ),
             },
             "event_spine": {
                 "mode": "authoritative",
@@ -1396,10 +1458,17 @@ async def background_dom_scanner(page, engine):
     """
     last_hash = ""
     last_url = None
+    last_checkpoint = datetime.now(UTC)
+    checkpoint_interval = 30.0     # seconds between heartbeat recovery points
     await engine.capture_visual_state(page)
+    engine.checkpoint(reason="session_start")
     while True:
         await asyncio.sleep(2.0)
         try:
+            now = datetime.now(UTC)
+            if (now - last_checkpoint).total_seconds() >= checkpoint_interval:
+                last_checkpoint = now
+                engine.checkpoint(reason="periodic")
             current_url = page.url
             content = await page.content()
             # Change-detection only. Not a security primitive.

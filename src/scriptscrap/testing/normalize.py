@@ -57,6 +57,12 @@ PINNED_ENV_KEYS = frozenset(
 # Keys carrying a monotonic clock reading. Ordering is asserted separately.
 MONOTONIC_KEYS = frozenset({"t_mono"})
 
+# Wall-clock elapsed durations: real numbers that differ between two runs of
+# identical behaviour, so they are normalised by name like the timestamps are.
+# What is under test is that the manifest CARRIES a duration, not its value.
+DURATION_KEYS = frozenset(
+    {"duration_seconds", "elapsed_seconds", "last_checkpoint"})
+
 # Transport metrics, not behaviour. `batches` counts how many IPC round trips
 # the runtime probe used to deliver its events; the same events can arrive in a
 # different number of batches depending on how the flush timer lands. The event
@@ -91,6 +97,8 @@ def normalize(value: Any, *, key: str | None = None) -> Any:
         return PLACEHOLDER_PINNED
     if key in MONOTONIC_KEYS:
         return PLACEHOLDER_MONO
+    if key in DURATION_KEYS:
+        return PLACEHOLDER_TS
     if key in TRANSPORT_KEYS:
         return PLACEHOLDER_TRANSPORT
     if isinstance(value, str):
