@@ -81,6 +81,26 @@ uv run python camoufox/camoufox_investigator.py
 It asks for a target URL and the engagement scope, opens a browser, and records
 what you do until you press ENTER. Output goes to `v13_investigation_output/`.
 
+The intended model is a **long passive session**: start it, hand the browser to
+an employee, let them work normally across many unrelated activities, and press
+ENTER once at the end. Nothing needs to be named, started, stopped or replayed;
+the separation into activities is inferred offline. A `checkpoint` heartbeat is
+written every 30s, so an abruptly interrupted capture still shows how far it
+got, and the session manifest records the duration, page/frame counts, gap and
+error tallies, and the completion state.
+
+Forensic mode is reachable from the same command:
+
+```bash
+uv run python camoufox/camoufox_investigator.py --forensic
+```
+
+`--forensic` enables the Firefox extension (full response bodies, script source
+before parse, the real cookie jar). `--rewrite-source SCRIPT:fn1,fn2` is a
+**separate** opt-in on top of it, because rewriting a response before the
+browser parses it is intervention, not observation. Whatever is enabled is
+written verbatim into the manifest.
+
 The probe runs in **two JavaScript worlds**, because Firefox isolates injected
 scripts from the page. Listeners (clicks, input, DOM mutations) go in the
 isolated world with the reporting channel; the monkey-patched instruments
@@ -108,7 +128,14 @@ bodies (via Firefox's `filterResponseData`), script source *before* it is
 parsed, and the real cookie jar including `httpOnly`.
 
 It is entirely optional — nothing in normal capture or offline analysis requires
-it — and whatever is enabled is written verbatim into the session manifest.
+it — and whatever is enabled is written verbatim into the session manifest. It
+is enabled with `--forensic` on the investigator (see **Running an
+investigation**), not only from the test helpers.
+
+Normal capture already inventories IndexedDB and Cache Storage — database and
+object-store names with record counts, and the request URLs a cache holds —
+which forensic mode is not required for. Record values and cached response
+bodies are still not read, and the capture says so with a specific gap.
 
 Response bodies go into a content-addressed blob store (`blobs/<sha256>`), so
 identical payloads are stored once and the event log keeps only a hash and a
@@ -140,7 +167,13 @@ rebuildable — deleting it and re-running `analyze` reproduces it exactly
 
 `analyze` derives endpoints (with path templating and query parameters), schemas
 with sample counts, scored dependency hypotheses, locator candidates with
-measured stability, observed states, and technology fingerprints. Every
+measured stability, observed states, and technology fingerprints. It also
+reconstructs the **semantic layer** of the session: the ordered workflow, a
+**form/control catalog** (controls, final values, option choices, submit and
+outcome), a **table catalog** (identity, columns, observed rows, row actions,
+sort/filter/paginate operations), and **automatically inferred activity
+segments** — the long session split into probable business activities from idle
+gaps, form submissions and route structure, without anyone naming a task. Every
 conclusion cites the raw `event_id`s that support it.
 
 It also writes an **evidence index**: one row per event holding the envelope and
@@ -170,8 +203,11 @@ uv run scriptscrap workspace v13_investigation_output
 ```
 
 Opens a local viewer over the analysed session: overview and capture health,
-timeline, endpoints, states, UI elements, schemas, dependencies, technology.
-Every record drills through to the raw events that support it.
+timeline, **activities** (the inferred business-activity segments), **forms**,
+**tables**, endpoints, states, UI elements, schemas, dependencies, technology.
+Every record drills through to the raw events that support it. The activities,
+forms and tables views are re-derived from the log per session, so they are
+hidden on a sanitised export (which carries no log) rather than shown empty.
 
 The path may be one session directory or a parent holding several.
 

@@ -87,6 +87,43 @@ vocabulary. `tests/test_export_leakage_exhaustive.py` derives this exemption
 list from the sanitised model rather than hard-coding it, so anything new that
 survives is a failure rather than an accepted exception.
 
+### The semantic catalogs record what was USED, not the whole application
+
+The form catalog, the table catalog and the activity segmentation are built
+from what the operator actually did. A form control never touched, a table row
+never scrolled into an interaction, an activity performed entirely outside the
+browser — none of those appear, because none was observed. This is the same
+posture as the rest of the tool: absence means *not observed*, never *not
+present*. In particular a table's rows are those the operator interacted with
+plus the header row, not every row a virtualised grid ever held.
+
+### Activity segmentation is a heuristic interpretation
+
+The split into activities is inferred from idle gaps, form submissions, returns
+to a home route and route-section changes. It is an interpretation laid over the
+timeline, carries a confidence derived from the boundary evidence, and never
+rewrites the ordered log — the workflow and the event log remain the source of
+truth. Two unrelated tasks with no idle gap and no route change between them can
+land in one segment; a single task interrupted by a long pause can split in two.
+
+### The semantic catalogs are dropped from a shared export
+
+`AnalysisResult.forms`, `.tables` and `.segments` carry application content —
+control labels and values, table cell data, route shapes and form ids. The
+shared export drops them (deny-by-default, `export/policy.py`), so they are read
+from the local session directory. A sanitised projection of each is future work;
+until every field is classified, DROP is the safe default.
+
+### IndexedDB values and cached response bodies are inventoried, not read
+
+IndexedDB is inventoried down to database/store names and record counts, and
+Cache Storage down to cache names and cached request URLs. The record *values*
+and the cached response *bodies* are not read; the capture records
+`indexed_db_values_not_captured` / `cache_storage_bodies_not_captured` rather
+than implying it saw them. `indexedDB.databases()` also requires an engine that
+supports enumeration; where it is unavailable the older `indexed_db_not_captured`
+gap is emitted instead.
+
 ## Deferred maintenance
 
 ### `ruff format` has not been adopted
