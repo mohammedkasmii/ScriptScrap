@@ -187,8 +187,15 @@ def _locator_call(element: UIElement) -> tuple[str, str | None]:
         return (f"page.locator({py_str('')})",
                 "NO LOCATOR OBSERVED -- fill this in by hand")
 
-    best = max(element.locators, key=lambda locator: locator.stability)
+    # UIElement.recommended applies the analyser's strategy preference when
+    # equally stable candidates exist (role/name, label, name, text, id, CSS).
+    # Choosing on stability alone made the alphabetically first candidate win,
+    # so generic CSS such as `input.form-control` displaced a unique label.
+    best = getattr(element, "recommended", None)
+    if best is None:
+        best = max(element.locators, key=lambda locator: locator.stability)
     value = py_str(best.value)
+    locator_note = None
 
     if best.strategy in {"css", "selector"}:
         call = f"page.locator({value})"
@@ -199,6 +206,21 @@ def _locator_call(element: UIElement) -> tuple[str, str | None]:
         call = f"page.locator({py_str('#' + best.value.lstrip('#'))})"
     elif best.strategy in {"test_id", "testid", "data-testid"}:
         call = f"page.get_by_test_id({value})"
+    elif best.strategy == "role_name":
+        # SelectorAnalyzer records author-supplied roles, plus the implicit
+        # roles of anchors and buttons. Use the model fields instead of parsing
+        # its human-readable `role=... name=...` evidence string.
+        role = getattr(element, "role", None)
+        if not role:
+            role = {"a": "link", "button": "button"}.get(
+                getattr(element, "tag", ""))
+        name = getattr(element, "label", None) or getattr(element, "text", None)
+        if role and name:
+            call = (f"page.get_by_role({py_str(role)}, "
+                    f"name={py_str(name)})")
+        else:
+            call = f"page.locator({value})"
+            locator_note = "ROLE LOCATOR INCOMPLETE -- fill this in by hand"
     elif best.strategy in {"role", "aria_role"}:
         call = f"page.get_by_role({value})"
     elif best.strategy in {"label", "aria_label"}:
@@ -208,7 +230,7 @@ def _locator_call(element: UIElement) -> tuple[str, str | None]:
     else:
         call = f"page.locator({value})"
 
-    notes = []
+    notes = [locator_note] if locator_note else []
     if best.stability < 1.0:
         notes.append(
             f"UNSTABLE {best.stability:.0%} -- resolved to {best.resolved_count} "

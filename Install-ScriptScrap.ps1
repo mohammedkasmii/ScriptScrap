@@ -134,6 +134,10 @@ try {
         }
     }
 
+    Write-Step "Installing Playwright Firefox for generated workflows"
+    & $UvExe run --no-sync playwright install firefox
+    Assert-LastCommand "Playwright Firefox installation failed"
+
     Write-Step "Running ScriptScrap's environment check"
     & $UvExe run --no-sync python diagnostics\check_environment.py
     Assert-LastCommand "The ScriptScrap environment check found a blocking problem"

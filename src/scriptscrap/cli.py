@@ -209,7 +209,11 @@ def cmd_generate(args: argparse.Namespace) -> int:
           f"{len(result.endpoints)} endpoint(s), {len(result.states)} state(s)")
     if result.auth_headers:
         print(f"  this API authenticated with: {', '.join(sorted(result.auth_headers))}")
-        print("  supply them via SCRIPTSCRAP_AUTH_HEADERS; no value was captured")
+        if args.kind == "client":
+            print("  supply them via SCRIPTSCRAP_AUTH_HEADERS; no value was captured")
+        else:
+            print("  implement the login steps or load Playwright storage state; "
+                  "no credential value was captured")
     print("\nThis describes ONE observed session. Routes nobody visited are "
           "not in it.")
     if args.kind == "playwright" and not sanitised:

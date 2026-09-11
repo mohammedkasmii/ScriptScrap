@@ -22,7 +22,8 @@ uv run python -m camoufox fetch     # one-off, downloads the browser
 Copy the complete project folder to the PC, open PowerShell in that folder, and
 run the bootstrap installer. It installs `uv` and Python for the current user,
 syncs the locked runtime dependencies, fetches the verified Camoufox browser
-build, runs the environment doctor, and launches an offline browser smoke test.
+build and Playwright Firefox, runs the environment doctor, and launches an
+offline browser smoke test.
 Administrator rights and preinstalled development tools are not required.
 
 ```powershell
