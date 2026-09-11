@@ -124,6 +124,38 @@ than implying it saw them. `indexedDB.databases()` also requires an engine that
 supports enumeration; where it is unavailable the older `indexed_db_not_captured`
 gap is emitted instead.
 
+### JavaScript dialogs cannot capture the employee's real choice
+
+The automation layer intercepts `alert`/`confirm`/`prompt`/`beforeunload`: the
+native dialog never reaches the employee, whether or not a handler is registered
+(with none, Playwright auto-dismisses). So the capture records the dialog's
+type, message and default, plus the recorder's own handling (dismiss, the
+no-handler default), and emits a `dialog_choice_unobservable` capture gap. It
+never claims the employee accepted or dismissed anything, because that choice is
+not observable under automation.
+
+### Drag-and-drop capture is verified only by dispatched events
+
+The probe listens for `dragstart`/`drop`/`dragend` and records source,
+destination and file metadata. A real employee's native drag fires trusted
+events content-script listeners receive, so it is captured in a live session.
+It is NOT possible to verify this through the automated harness: Playwright
+cannot drive native HTML5 drag-and-drop on Firefox (its `drag_and_drop` uses
+synthetic mouse events that do not start a native drag), and a synthetic
+`DragEvent` dispatched from the driver's own world does not reliably reach the
+probe. The browser test therefore fires the DragEvent sequence from the page's
+own world, which exercises the same listener path; a trusted drag by a human is
+believed to work but is not proven in CI.
+
+### Popup isolated-world listeners are re-armed, not native
+
+A Camoufox quirk: the context-level init script defines the probe's globals in a
+popup or new tab's isolated world, but its DOM listeners do not fire there. The
+recorder re-arms the isolated probe in each non-initial page's live document
+(at load and on each navigation); the initial page uses the context script,
+which works. This is verified against a popup and multiple tabs, but it is a
+workaround for a browser behaviour, not a guarantee across every future build.
+
 ## Deferred maintenance
 
 ### `ruff format` has not been adopted

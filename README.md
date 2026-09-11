@@ -79,7 +79,10 @@ uv run python camoufox/camoufox_investigator.py
 ```
 
 It asks for a target URL and the engagement scope, opens a browser, and records
-what you do until you press ENTER. Output goes to `v13_investigation_output/`.
+what you do until you press ENTER. **Each investigation writes its own
+directory:** by default a timestamped one under `scriptscrap_output/`, or pass
+`--output DIR`. The tool refuses to write into a directory that already holds a
+session rather than appending two sessions into one log.
 
 The intended model is a **long passive session**: start it, hand the browser to
 an employee, let them work normally across many unrelated activities, and press
@@ -88,6 +91,17 @@ the separation into activities is inferred offline. A `checkpoint` heartbeat is
 written every 30s, so an abruptly interrupted capture still shows how far it
 got, and the session manifest records the duration, page/frame counts, gap and
 error tallies, and the completion state.
+
+**Every page, tab and popup is covered on the same footing as the first.** A
+scanner runs per page (visual snapshots, DOM/form inventory, storage snapshots),
+and on session end every open in-scope page is drained and its final state
+extracted -- not only the page the operator started on. The recorder captures
+semantic actions, not just raw clicks: double- and right-click, the actionable
+element behind a click on a decorative child, hover-opened menus, drag/drop
+(source, destination, file metadata), meaningful scrolling that reveals
+virtualized rows, file selection, and JavaScript dialogs (type, message and the
+recorder's handling -- the employee's real accept/dismiss choice is recorded as
+a capture gap, because the automation layer intercepts dialogs).
 
 Forensic mode is reachable from the same command:
 
