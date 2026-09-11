@@ -122,3 +122,54 @@ def test_every_table_cites_its_evidence():
     _reset()
     tables = _catalog([row_action("Edit", 0, ["1", "Alice", "42", ""])])
     assert tables[0].evidence.event_ids
+
+
+# --- virtualized rows harvested on scroll (item 5) ------------------------
+
+def scroll(visible_rows, table_id="orders"):
+    return ev(EventType.USER_SCROLL, {"tag": "table"},
+              table={"table_id": table_id, "columns": ["Id", "Name"],
+                     "visible_rows": visible_rows})
+
+
+def test_scrolling_harvests_visible_rows():
+    _reset()
+    tables = _catalog([
+        scroll([{"row_id": "r1", "cells": ["1", "Alice"]},
+                {"row_id": "r2", "cells": ["2", "Bob"]}]),
+        scroll([{"row_id": "r3", "cells": ["3", "Carol"]}]),
+    ])
+    rows = tables[0].rows
+    ids = {r["row_id"] for r in rows}
+    assert ids == {"r1", "r2", "r3"}
+    assert tables[0].operations.get("scroll", 0) >= 1
+
+
+def test_virtualized_rows_are_deduplicated_by_id():
+    _reset()
+    tables = _catalog([
+        scroll([{"row_id": "r1", "cells": ["1", "Alice"]}]),
+        # The same row scrolls back into view: it is one row, not two.
+        scroll([{"row_id": "r1", "cells": ["1", "Alice"]},
+                {"row_id": "r2", "cells": ["2", "Bob"]}]),
+    ])
+    assert len(tables[0].rows) == 2
+
+
+def test_rows_without_ids_are_deduplicated_by_fingerprint():
+    _reset()
+    tables = _catalog([
+        scroll([{"cells": ["1", "Alice"]}]),
+        scroll([{"cells": ["1", "Alice"]}, {"cells": ["2", "Bob"]}]),
+    ])
+    assert len(tables[0].rows) == 2
+
+
+def test_each_row_records_the_operation_that_revealed_it():
+    _reset()
+    tables = _catalog([
+        row_action("Edit", 0, ["1", "Alice", "42", ""]),        # via "open"
+        scroll([{"row_id": "r9", "cells": ["9", "Zoe"]}]),        # via "scroll"
+    ])
+    scrolled = next(r for r in tables[0].rows if r.get("row_id") == "r9")
+    assert scrolled["observed_via"] == "scroll"

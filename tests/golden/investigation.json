@@ -281,6 +281,7 @@
       },
       "lifecycle": {
         "console_messages": 1,
+        "dialogs": 0,
         "downloads": 0,
         "page_exceptions": 0,
         "pages": 1,

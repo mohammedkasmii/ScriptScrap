@@ -80,6 +80,12 @@ class EventType(StrEnum):
     USER_CHANGE = "user_change"
     USER_SUBMIT = "user_submit"
     USER_KEY = "user_key"
+    # Richer agency interactions. Hover-opened menus, drag/drop, and the
+    # meaningful scrolling that reveals virtualized rows -- all bounded and
+    # deduplicated at capture time so a busy page cannot flood the log.
+    USER_HOVER = "user_hover"
+    USER_DRAG = "user_drag"
+    USER_SCROLL = "user_scroll"
 
     # Runtime APIs that trigger network activity (runtime probe)
     RUNTIME_FETCH = "runtime_fetch"
@@ -103,6 +109,11 @@ class EventType(StrEnum):
     CONSOLE_MESSAGE = "console_message"
     PAGE_EXCEPTION = "page_exception"
     DOWNLOAD = "download"
+    # A JavaScript dialog (alert/confirm/prompt/beforeunload). The type, message
+    # and default are observed; the employee's real choice is NOT, because the
+    # automation layer intercepts dialogs -- recorded honestly as the recorder's
+    # handling plus a capture gap, never as a choice the operator made.
+    DIALOG = "dialog"
 
     # State
     STORAGE_SNAPSHOT = "storage_snapshot"

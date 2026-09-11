@@ -18,7 +18,8 @@ export const title = 'Timeline';
 // actually ask; the raw type list is available beside it.
 const GROUPS = {
   User: ['user_click', 'user_dblclick', 'user_rightclick', 'user_input',
-    'user_change', 'user_submit', 'user_key'],
+    'user_change', 'user_submit', 'user_key', 'user_hover', 'user_drag',
+    'user_scroll'],
   Network: ['http_request', 'http_response', 'http_failed',
     'runtime_fetch', 'runtime_xhr', 'runtime_beacon', 'runtime_form_submit'],
   Navigation: ['page_opened', 'page_closed', 'popup_opened', 'frame_attached',
@@ -26,7 +27,8 @@ const GROUPS = {
   DOM: ['dom_snapshot', 'dom_mutation', 'html_snapshot', 'screenshot'],
   Storage: ['storage_snapshot', 'storage_change', 'cookie_changed', 'cookie_deleted'],
   WebSocket: ['ws_open', 'ws_frame_sent', 'ws_frame_received', 'ws_close', 'ws_error'],
-  Problems: ['console_message', 'page_exception', 'sensor_error', 'capture_gap'],
+  Problems: ['console_message', 'page_exception', 'sensor_error', 'capture_gap',
+    'dialog'],
 };
 
 export async function render(root) {

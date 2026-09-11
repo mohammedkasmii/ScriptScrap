@@ -25,7 +25,13 @@ from .models import Evidence
 _ACTION_TYPES = (
     EventType.USER_CLICK, EventType.USER_DBLCLICK, EventType.USER_RIGHTCLICK,
     EventType.USER_INPUT, EventType.USER_CHANGE, EventType.USER_SUBMIT,
+    EventType.USER_SCROLL,
 )
+
+# A hard bound so a multi-hour session scrolling a huge virtualized table cannot
+# grow the catalog without limit. The rows kept are those observed earliest;
+# the count of how many were seen is preserved.
+_MAX_ROWS_PER_TABLE = 500
 
 # Words in a control's accessible name that mark a pagination action.
 _PAGINATION_WORDS = ("next", "prev", "previous", "page", "suivant", "précédent",
@@ -81,14 +87,25 @@ class TableCatalogAnalyzer:
             if table.get("caption") and not entry.caption:
                 entry.caption = str(table["caption"])
 
-            self._record_row(rows[key], table)
-            op, prev_op_key = self._operation(event, table, key, prev_op_key)
+            # The operation this event performed (sort/filter/paginate/scroll),
+            # so a newly-observed row-set can be attributed to what revealed it.
+            if event.type is EventType.USER_SCROLL:
+                op, prev_op_key = "scroll", prev_op_key
+            else:
+                op, prev_op_key = self._operation(event, table, key, prev_op_key)
+                self._record_row(rows[key], table, op or "open")
             if op:
                 ops[key][op] += 1
             elif self._is_row_action(event, table):
                 label = self._action_label(event)
                 if label and label not in actions[key]:
                     actions[key].append(label)
+
+            # Rows harvested from the viewport on a scroll or a table operation,
+            # deduplicated by stable id (or a cell fingerprint), each tagged with
+            # the operation that first revealed it.
+            self._record_visible_rows(rows[key], table.get("visible_rows"),
+                                      op or "open")
 
         result = []
         for key, entry in entries.items():
@@ -105,21 +122,51 @@ class TableCatalogAnalyzer:
         return f"{event.frame_id}|{ident}"
 
     @staticmethod
-    def _record_row(store: dict[str, dict[str, Any]], table: dict) -> None:
+    def _row_identity(row_id, index, cells) -> str:
+        if row_id:
+            return str(row_id)
+        if index is not None:
+            return f"i{index}"
+        # No stable id: a bounded fingerprint of the cell contents. Two rows with
+        # identical cells are indistinguishable and collapse, which is the
+        # correct, conservative behaviour for a virtualized table with no ids.
+        return "c|" + "|".join(str(c) for c in cells)[:200]
+
+    @classmethod
+    def _record_row(cls, store: dict[str, dict[str, Any]], table: dict, via: str) -> None:
         cells = table.get("cells")
         if not isinstance(cells, list) or not cells:
             return
         # A header-only interaction (a sort) is not a data row.
         if table.get("on_header"):
             return
-        row_id = table.get("row_id")
-        index = table.get("row_index")
-        identity = str(row_id) if row_id else (
-            f"i{index}" if index is not None else "|".join(str(c) for c in cells))
+        cls._store_row(store, table.get("row_id"), table.get("row_index"), cells, via)
+
+    @classmethod
+    def _record_visible_rows(cls, store: dict[str, dict[str, Any]],
+                             visible_rows, via: str) -> None:
+        if not isinstance(visible_rows, list):
+            return
+        for row in visible_rows:
+            if not isinstance(row, dict):
+                continue
+            cells = row.get("cells")
+            if not isinstance(cells, list) or not cells:
+                continue
+            cls._store_row(store, row.get("row_id"), row.get("row_index"), cells, via)
+
+    @classmethod
+    def _store_row(cls, store, row_id, index, cells, via: str) -> None:
+        identity = cls._row_identity(row_id, index, cells)
+        if identity in store:
+            return          # already observed: keep the first sighting's provenance
+        if len(store) >= _MAX_ROWS_PER_TABLE:
+            return          # bounded for a multi-hour session
         store[identity] = {
             "row_id": row_id,
             "row_index": index,
             "cells": [str(c) for c in cells],
+            "observed_via": via,
         }
 
     def _operation(self, event, table, key, prev_op_key):

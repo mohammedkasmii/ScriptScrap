@@ -45,6 +45,9 @@ PROBE_EVENT_TYPES: dict[str, EventType] = {
     "user_change": EventType.USER_CHANGE,
     "user_submit": EventType.USER_SUBMIT,
     "user_key": EventType.USER_KEY,
+    "user_hover": EventType.USER_HOVER,
+    "user_drag": EventType.USER_DRAG,
+    "user_scroll": EventType.USER_SCROLL,
     "runtime_fetch": EventType.RUNTIME_FETCH,
     "runtime_xhr": EventType.RUNTIME_XHR,
     "runtime_beacon": EventType.RUNTIME_BEACON,
@@ -73,6 +76,11 @@ PROBE_EVENT_TYPES: dict[str, EventType] = {
 # The reduction itself lives in `scope.py`: the lifecycle sensor needs the same
 # policy, and a boundary rule that exists in only one sensor is a boundary rule
 # with a hole in it.
+
+# Payload keys that would collide with EventLog.emit()/emit_event()'s own
+# parameters. A probe record carrying one is renamed rather than lost.
+_RESERVED_PAYLOAD_KEYS = frozenset({"source", "type", "page_id", "frame_id",
+                                    "event_type"})
 
 DEFAULT_PROBE_CONFIG = {
     "maxBuffer": 500,
@@ -257,6 +265,14 @@ class RuntimeSensor:
         payload["is_top_frame"] = record.get("is_top")
 
         payload = self._apply_scope(payload)
+
+        # A payload key that collides with emit_event's own parameters would
+        # raise "multiple values for argument" and lose the whole record. The
+        # probe's payload comes from JavaScript, so this is defended
+        # structurally rather than by convention -- the same guard the
+        # extension sensor applies.
+        for reserved in _RESERVED_PAYLOAD_KEYS & payload.keys():
+            payload[f"probe_{reserved}"] = payload.pop(reserved)
 
         self.received += 1
         self.engine.emit_event(

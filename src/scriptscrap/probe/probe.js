@@ -519,6 +519,35 @@
     return null;
   }
 
+  // Currently-visible rows of a table, bounded. Used for virtualized tables,
+  // where the DOM holds only the rows near the viewport: harvesting the visible
+  // ones as the operator scrolls reconstructs what they actually saw. Capped
+  // hard, and each row carries a stable id where the markup offers one so the
+  // analysis can deduplicate across scroll events.
+  function visibleTableRows(table, max) {
+    const out = [];
+    try {
+      const rows = table.querySelectorAll("tbody tr,[role=row]");
+      const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+      for (let i = 0; i < rows.length && out.length < max; i++) {
+        const row = rows[i];
+        let rect;
+        try { rect = row.getBoundingClientRect(); } catch (e) { continue; }
+        if (rect.bottom < 0 || rect.top > vh || (rect.width === 0 && rect.height === 0)) {
+          continue;   // not in the viewport
+        }
+        const cells = row.querySelectorAll("td,th,[role=cell],[role=gridcell]");
+        out.push({
+          row_id: row.id || (row.getAttribute && (row.getAttribute("data-id")
+            || row.getAttribute("data-row-id"))) || null,
+          cells: Array.prototype.slice.call(cells, 0, 40).map((c) =>
+            clip((c.innerText || c.textContent || "").trim().slice(0, 80))),
+        });
+      }
+    } catch (e) { /* ignore */ }
+    return out;
+  }
+
   // --- user actions ------------------------------------------------------
 
   const CLICK_TYPES = { user_click: 1, user_dblclick: 1, user_rightclick: 1 };
@@ -536,7 +565,18 @@
         trusted: !!ev.isTrusted,
       };
       const tctx = tableContext(el);
-      if (tctx) payload.table = tctx;
+      if (tctx) {
+        // On a table OPERATION -- a sort on a header, a filter/pager wired by
+        // aria-controls -- harvest the rows currently visible, so the analysis
+        // can attribute the new table state to the operation that produced it.
+        if (tctx.on_header || tctx.via === "aria-controls") {
+          const table = el.closest && el.closest(
+            "table,[role=table],[role=grid],[role=treegrid]");
+          const target = table || (tctx.table_id && document.getElementById(tctx.table_id));
+          if (target) tctx.visible_rows = visibleTableRows(target, 60);
+        }
+        payload.table = tctx;
+      }
       if (CLICK_TYPES[type] && el !== raw) {
         payload.original_target = fingerprint(raw);
       }
@@ -614,6 +654,103 @@
       if (structural || shortcut) {
         onUserEvent("user_key", ev);
       }
+    }, { capture: true, passive: true });
+
+    // --- hover-opened menus ---------------------------------------------
+    // Only elements that OPEN something on hover, and only once each within a
+    // window, so a mouse crossing the page cannot flood the log. A menu is
+    // recognised by ARIA -- aria-haspopup, or a menu/menubar/menuitem role, or
+    // being inside one.
+    const hoverSeen = new Map();       // element -> last emit time
+    const HOVER_DEDUP_MS = 1500;
+    function hoverTarget(el) {
+      try {
+        return el.closest && el.closest(
+          "[aria-haspopup],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio]");
+      } catch (e) { return null; }
+    }
+    document.addEventListener("pointerover", (ev) => {
+      guard("user_hover", () => {
+        const target = hoverTarget(ev.target);
+        if (!target) return;
+        const now = nowMs();
+        const last = hoverSeen.get(target) || 0;
+        if (now - last < HOVER_DEDUP_MS) return;
+        hoverSeen.set(target, now);
+        if (hoverSeen.size > 200) hoverSeen.clear();   // bounded
+        emit("user_hover", { element: fingerprint(target) });
+      });
+    }, { capture: true, passive: true });
+
+    // --- drag and drop ---------------------------------------------------
+    // Field names avoid `source` deliberately: it collides with the event
+    // envelope's own `source` on the Python side.
+    let dragSource = null;
+    document.addEventListener("dragstart", (ev) => {
+      guard("user_drag_start", () => {
+        dragSource = fingerprint(ev.target);
+        emit("user_drag", { phase: "start", drag_source: dragSource });
+      });
+    }, { capture: true, passive: true });
+    document.addEventListener("drop", (ev) => {
+      guard("user_drag_drop", () => {
+        const dt = ev.dataTransfer;
+        let files = null;
+        try {
+          if (dt && dt.files && dt.files.length) {
+            files = Array.prototype.map.call(dt.files, (f) => ({
+              name: clip(f.name), size: f.size, type: f.type || null }));
+          }
+        } catch (e) { /* ignore */ }
+        emit("user_drag", {
+          phase: "drop", drag_source: dragSource,
+          drag_destination: fingerprint(ev.target), files: files,
+        });
+        dragSource = null;
+      });
+    }, { capture: true, passive: true });
+    document.addEventListener("dragend", (ev) => {
+      guard("user_drag_end", () => {
+        // A dragend with a source still set means the drag was cancelled (no
+        // drop). Recorded so an abandoned drag is distinguishable from one that
+        // landed.
+        if (dragSource) {
+          emit("user_drag", { phase: "cancel", drag_source: dragSource });
+          dragSource = null;
+        }
+      });
+    }, { capture: true, passive: true });
+
+    // --- meaningful scrolling / virtualized rows ------------------------
+    // Debounced, and only when the scroll is inside a table/grid: the point is
+    // to harvest the rows a virtualized table reveals as the operator scrolls,
+    // not to log every pixel of page scroll.
+    let scrollTimer = null;
+    let scrollTarget = null;
+    document.addEventListener("scroll", (ev) => {
+      const node = ev.target;
+      let table = null;
+      try {
+        table = node && node.closest
+          ? node.closest("table,[role=table],[role=grid],[role=treegrid]")
+          : null;
+        if (!table && node && node.querySelector) {
+          table = node.querySelector("table,[role=table],[role=grid],[role=treegrid]");
+        }
+      } catch (e) { table = null; }
+      if (!table) return;
+      scrollTarget = table;
+      if (scrollTimer !== null) return;
+      scrollTimer = setTimeout(() => {
+        scrollTimer = null;
+        guard("user_scroll", () => {
+          if (!scrollTarget) return;
+          const ctx = tableContext(scrollTarget) || {};
+          ctx.visible_rows = visibleTableRows(scrollTarget, 60);
+          emit("user_scroll", { reason: "scroll", table: ctx });
+          scrollTarget = null;
+        });
+      }, 300);
     }, { capture: true, passive: true });
 
     // Records observed in the page's own world arrive here.

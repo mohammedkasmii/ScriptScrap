@@ -982,6 +982,128 @@ TABLE_PAGE_HTML = """<!DOCTYPE html>
 </html>
 """
 
+INTERACTIONS_PAGE_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Interactions</title>
+<link rel="stylesheet" href="/assets/app.css">
+<style>
+#menu { display: none; }
+#menu.open { display: block; }
+#virt-wrap { height: 180px; overflow: auto; border: 1px solid #999; width: 320px; }
+#virt-spacer { position: relative; }
+#drop-target { border: 2px dashed #999; padding: 10px; min-height: 24px; }
+</style>
+</head>
+<body>
+<h1 id="titre-interactions">Interactions</h1>
+
+<!-- Hover-opened menu: the trigger declares aria-haspopup, and the menu shows
+     on hover. The probe records the hover on the menu trigger. -->
+<div id="menu-region">
+  <button type="button" id="menu-trigger" aria-haspopup="menu"
+          aria-controls="menu">Actions</button>
+  <ul id="menu" role="menu" aria-labelledby="menu-trigger">
+    <li role="menuitem" id="menu-open">Ouvrir</li>
+    <li role="menuitem" id="menu-archive">Archiver</li>
+  </ul>
+</div>
+
+<!-- A JavaScript dialog: confirm(). The automation layer intercepts it; the
+     recorder observes type/message and dismisses. -->
+<button type="button" id="btn-confirm">Confirmer une action</button>
+<div id="confirm-result"></div>
+
+<!-- Drag and drop. Playwright cannot drive native HTML5 DnD, so a button lets
+     the page fire the real DragEvent sequence a browser produces during a drag;
+     the probe observes the same listener path either way. -->
+<div id="drag-src" draggable="true" data-item="dossier-7">Dossier 7</div>
+<div id="drop-target" aria-label="Corbeille">Deposer ici</div>
+<button type="button" id="sim-drag">Glisser vers la corbeille</button>
+<div id="drop-result"></div>
+
+<!-- A genuinely virtualized table: only a window of rows is in the DOM, and
+     which rows are rendered changes on scroll. -->
+<div id="virt-wrap" aria-label="Grand tableau">
+  <div id="virt-spacer">
+    <table id="virt-table" role="grid" aria-label="Grand tableau">
+      <caption>Grand tableau</caption>
+      <thead><tr><th>Ref</th><th>Client</th><th>Montant</th></tr></thead>
+      <tbody id="virt-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  // Hover menu.
+  var trigger = document.getElementById("menu-trigger");
+  var menu = document.getElementById("menu");
+  trigger.addEventListener("mouseover", function () { menu.classList.add("open"); });
+  trigger.addEventListener("focus", function () { menu.classList.add("open"); });
+
+  // Dialog.
+  document.getElementById("btn-confirm").addEventListener("click", function () {
+    var ok = window.confirm("Proceder a l'archivage ?");
+    document.getElementById("confirm-result").textContent = "confirm=" + ok;
+  });
+
+  // Drag and drop.
+  var src = document.getElementById("drag-src");
+  var target = document.getElementById("drop-target");
+  src.addEventListener("dragstart", function (ev) {
+    ev.dataTransfer.setData("text/plain", src.getAttribute("data-item"));
+  });
+  target.addEventListener("dragover", function (ev) { ev.preventDefault(); });
+  target.addEventListener("drop", function (ev) {
+    ev.preventDefault();
+    document.getElementById("drop-result").textContent =
+      "drop=" + ev.dataTransfer.getData("text/plain");
+  });
+  document.getElementById("sim-drag").addEventListener("click", function () {
+    var dt = new DataTransfer();
+    dt.setData("text/plain", src.getAttribute("data-item"));
+    src.dispatchEvent(new DragEvent("dragstart",
+      { bubbles: true, cancelable: true, dataTransfer: dt }));
+    target.dispatchEvent(new DragEvent("drop",
+      { bubbles: true, cancelable: true, dataTransfer: dt }));
+    src.dispatchEvent(new DragEvent("dragend",
+      { bubbles: true, cancelable: true, dataTransfer: dt }));
+  });
+
+  // Virtualized table: 60 rows of data, ~12 rendered at a time.
+  var DATA = [];
+  for (var i = 1; i <= 60; i += 1) {
+    DATA.push({ id: "V-" + i, client: "Client " + i, montant: i * 10 });
+  }
+  var ROW_H = 24, WINDOW = 12;
+  var body = document.getElementById("virt-body");
+  var spacer = document.getElementById("virt-spacer");
+  var wrap = document.getElementById("virt-wrap");
+  spacer.style.height = (DATA.length * ROW_H) + "px";
+  function render() {
+    var start = Math.floor(wrap.scrollTop / ROW_H);
+    var end = Math.min(DATA.length, start + WINDOW);
+    var html = "";
+    for (var j = start; j < end; j += 1) {
+      var d = DATA[j];
+      html += '<tr data-id="' + d.id + '" style="position:absolute;top:' +
+        (j * ROW_H) + 'px"><td>' + d.id + '</td><td>' + d.client +
+        '</td><td>' + d.montant + '</td></tr>';
+    }
+    body.innerHTML = html;
+  }
+  wrap.addEventListener("scroll", render);
+  render();
+  document.documentElement.setAttribute("data-fixture-interactions-ready", "true");
+})();
+</script>
+</body>
+</html>
+"""
+
 NOT_FOUND_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head><meta charset="utf-8"><title>ScriptScrap Fixture - 404</title></head>

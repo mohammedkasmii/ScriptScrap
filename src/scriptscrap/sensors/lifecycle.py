@@ -7,6 +7,7 @@ the page the operator started on. A page-only listener would miss them entirely.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import Any
 
@@ -30,6 +31,7 @@ class LifecycleSensor:
         self.console_messages = 0
         self.page_exceptions = 0
         self.downloads = 0
+        self.dialogs = 0
 
     # -- engagement boundary ------------------------------------------------
     def _scoped(self, **payload: Any) -> dict[str, Any]:
@@ -103,6 +105,7 @@ class LifecycleSensor:
         page.on("console", lambda m: self._on_console(m, page_id))
         page.on("pageerror", lambda e: self._on_page_error(e, page_id))
         page.on("download", lambda d: self._on_download(d, page_id))
+        page.on("dialog", lambda d: self._on_dialog(d, page_id))
         return page_id
 
     # -- handlers ----------------------------------------------------------
@@ -216,6 +219,59 @@ class LifecycleSensor:
             stack=(getattr(error, "stack", None) or "")[:MAX_CONSOLE_TEXT] or None,
         )
 
+    def _on_dialog(self, dialog: Any, page_id: str | None) -> None:
+        """A JavaScript dialog: observe it, then dismiss it.
+
+        The automation layer intercepts alert/confirm/prompt/beforeunload -- the
+        native dialog never reaches the employee, whether or not a handler is
+        registered (with none, Playwright auto-dismisses). So the honest record
+        is the dialog's type, message and default, plus the recorder's OWN
+        handling, and a capture gap stating the employee's real choice cannot be
+        observed under automation. Dismiss matches the no-handler default, so
+        registering this handler does not change behaviour.
+        """
+        self.dialogs += 1
+        dtype = None
+        message = None
+        default_value = None
+        with contextlib.suppress(Exception):
+            dtype = dialog.type
+        with contextlib.suppress(Exception):
+            message = dialog.message
+        with contextlib.suppress(Exception):
+            default_value = dialog.default_value
+        # Dismiss asynchronously: in the async API `dialog.dismiss()` is a
+        # coroutine, and the triggering call (confirm/alert) blocks until the
+        # dialog is handled. Scheduling the await lets the click proceed while
+        # still dismissing -- matching the no-handler default.
+        handled = "dismissed"
+        try:
+            asyncio.get_running_loop().create_task(self._dismiss_dialog(dialog))
+        except RuntimeError:
+            handled = "unhandled"
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.DIALOG,
+            page_id=page_id,
+            dialog_type=dtype,
+            message=message[:MAX_CONSOLE_TEXT] if isinstance(message, str) else message,
+            default_value=default_value,
+            handling=handled,
+            handled_by="recorder",
+        )
+        # The one thing we cannot know: what the employee would have chosen.
+        self.engine.emit_capture_gap(
+            "dialog_choice_unobservable",
+            dialog_type=dtype,
+            note=("a JavaScript dialog was intercepted by the automation layer; "
+                  "the recorder dismissed it (the no-handler default) and the "
+                  "employee's real accept/dismiss choice is not observable"),
+        )
+
+    async def _dismiss_dialog(self, dialog: Any) -> None:
+        with contextlib.suppress(Exception):
+            await dialog.dismiss()
+
     def _on_download(self, download: Any, page_id: str | None) -> None:
         self.downloads += 1
         # Metadata only. File content never enters the event log.
@@ -236,4 +292,5 @@ class LifecycleSensor:
             "console_messages": self.console_messages,
             "page_exceptions": self.page_exceptions,
             "downloads": self.downloads,
+            "dialogs": self.dialogs,
         }
