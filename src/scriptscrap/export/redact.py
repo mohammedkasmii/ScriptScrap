@@ -139,7 +139,7 @@ class Redactor:
             return describe_credential(value)
 
         if name in ALWAYS_PSEUDONYMISE_KEYS and isinstance(value, str) and value:
-            return self._pseudonym(value, "VALUE")
+            return self.pseudonym_for(value, "VALUE")
 
         if isinstance(value, dict):
             return {k: self.scrub(v, name=str(k), depth=depth + 1) for k, v in value.items()}
@@ -158,10 +158,10 @@ class Redactor:
         replaced = _JWT.sub(lambda _: self._removed("JWT"), text)
         replaced = _BEARER.sub(lambda _: self._removed("Bearer token"), replaced)
         replaced = _EMAIL.sub(
-            lambda m: self._pseudonym(m.group(0), "EMAIL"), replaced)
+            lambda m: self.pseudonym_for(m.group(0), "EMAIL"), replaced)
 
         if replaced == text and _IDENTIFIER.match(text.strip()):
-            return self._pseudonym(text.strip(), "ID")
+            return self.pseudonym_for(text.strip(), "ID")
         return replaced
 
     def scrub_example(self, value: Any) -> Any:
@@ -191,13 +191,13 @@ class Redactor:
         )
         if is_vocabulary:
             return text
-        return self._pseudonym(text, "VALUE")
+        return self.pseudonym_for(text, "VALUE")
 
     def _removed(self, label: str) -> str:
         self.credentials_removed += 1
         return f"<redacted: {label}>"
 
-    def _pseudonym(self, value: str, kind: str) -> str:
+    def pseudonym_for(self, value: str, kind: str) -> str:
         self.values_pseudonymised += 1
         return self.pseudonyms.pseudonym(value, kind)
 

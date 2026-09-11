@@ -8,19 +8,30 @@ and that its tests need no browser.
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 
 from ..events import Event, EventLogReader, EventType
 from .correlation import CorrelationAnalyzer
 from .endpoints import EndpointAnalyzer, endpoint_key_for_request
+from .forms import FormCatalogAnalyzer
 from .health import HealthAnalyzer
-from .models import ANALYSIS_VERSION, AnalysisResult, Evidence, Finding
+from .models import (
+    ANALYSIS_VERSION,
+    AnalysisResult,
+    EventIndexRow,
+    Evidence,
+    Finding,
+)
 from .reconcile import Reconciler
 from .schema import SchemaInferrer
+from .segmentation import SegmentationAnalyzer
 from .selectors import SelectorAnalyzer
 from .states import StateAnalyzer
+from .tables import TableCatalogAnalyzer
 from .technology import TechnologyAnalyzer, opaque_state_fields
+from .workflow import WorkflowAnalyzer
 
 
 def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
@@ -44,15 +55,45 @@ def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
     result.dependencies = CorrelationAnalyzer().analyze(events, endpoint_of)
     result.ui_elements = SelectorAnalyzer().analyze(events)
     result.states, result.transitions = StateAnalyzer().analyze(events)
+    result.workflow = WorkflowAnalyzer().analyze(events)
+    # A long session, split into probable business activities. The ordered
+    # workflow above is untouched: this is an interpretation laid over it.
+    result.segments = SegmentationAnalyzer().analyze(events)
+    # The forms the operator used, assembled from the scattered observations
+    # of each one into a single per-form record.
+    result.forms = FormCatalogAnalyzer().analyze(events)
+    # The tables the operator worked, and what was observed of each.
+    result.tables = TableCatalogAnalyzer().analyze(events)
     # Forensic evidence, when present. A normal session yields empty lists and
     # a health report built from the sensors that did run -- analysis must
     # never require the extension.
     result.activities = Reconciler().analyze(events)
     result.health = HealthAnalyzer().analyze(events).to_dict()
     result.scripts = _script_inventory(events)
+    result.auth_headers = _auth_headers(events)
 
     result.findings = _findings(events, result)
     return result
+
+
+def _auth_headers(events: list[Event]) -> dict[str, int]:
+    """Which credential-bearing headers the application sent, and how often.
+
+    NAMES only. The capture classifies a header as credential-bearing and
+    records that it was present; it never records the value. That asymmetry is
+    the whole point -- it is what lets a generated client state "this API
+    authenticates with a Cookie header" without ever having held the operator's
+    session.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for event in events:
+        if event.type is not EventType.HTTP_REQUEST:
+            continue
+        if event.payload.get("evidence_reduced"):
+            continue          # out of scope: not our application's contract
+        for name in event.payload.get("credential_header_names") or []:
+            counts[str(name).lower()] += 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def _script_inventory(events: list[Event]) -> list[dict]:
@@ -76,9 +117,77 @@ def _script_inventory(events: list[Event]) -> list[dict]:
 
 
 def analyze_log(path: str | Path) -> AnalysisResult:
-    reader = EventLogReader(path)
+    """Analyse a log on disk, and index where each event's evidence lives.
+
+    `analyze_events` stays offset-free: a caller holding events in memory has
+    no file for an offset to point into, and inventing one would be a lie.
+    Offsets are attached here, where the file is.
+    """
+    reader = EventLogReader(path, with_offsets=True)
     session_id = reader.events[0].session_id if reader.events else "unknown"
-    return analyze_events(list(reader), session_id)
+    result = analyze_events(list(reader), session_id)
+    result.findings.extend(_log_integrity_findings(reader))
+
+    index: list[EventIndexRow] = []
+    for event in reader.events:
+        located = reader.offsets.get(event.event_id)
+        if located is None:
+            continue
+        offset, length = located
+        index.append(EventIndexRow(
+            event_id=event.event_id,
+            seq=event.seq,
+            type=str(event.type),
+            source=str(event.source),
+            t_wall=event.t_wall,
+            t_mono=event.t_mono,
+            page_id=event.page_id,
+            frame_id=event.frame_id,
+            byte_offset=offset,
+            byte_length=length,
+        ))
+    result.event_index = index
+
+    log = Path(path)
+    result.log_size = log.stat().st_size
+    result.log_sha256 = _sha256_of(log)
+    return result
+
+
+def _log_integrity_findings(reader: EventLogReader) -> list[Finding]:
+    """Structural defects in the log itself.
+
+    `EventLogReader.validate` has detected these since M1 and nothing acted on
+    them. A duplicated event id in particular makes every citation of that id
+    ambiguous, and the evidence index resolves it with fetchone().
+    """
+    findings: list[Finding] = []
+    for problem in reader.validate():
+        if problem.kind == "duplicate_event_id":
+            findings.append(Finding(
+                kind="duplicate_event_id", severity="critical",
+                message=(f"the log repeats an event id ({problem.detail}); every "
+                         "citation of it is ambiguous and the evidence index "
+                         "will refuse to store it"),
+                count=1))
+        elif problem.kind in ("duplicate_seq", "unordered", "sequence_gap"):
+            findings.append(Finding(
+                kind="log_integrity", severity="warning",
+                message=f"{problem.kind}: {problem.detail}", count=1))
+    return findings
+
+
+def _sha256_of(path: Path) -> str:
+    """Fingerprint the log the offsets were built from.
+
+    Read in chunks: a session log is routinely tens of megabytes and there is
+    no reason to hold one in memory to hash it.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _attribute_events(events: list[Event], endpoints) -> dict[str, str]:
@@ -216,5 +325,40 @@ def _findings(events: list[Event], result: AnalysisResult) -> list[Finding]:
             message=(f"{len(single)} endpoint(s) templated from a single concrete path; "
                      "the parameter is a guess from value shape alone"),
             count=len(single),
+        ))
+
+    # A generated `.fill("")` for eighteen fields looks like a script that will
+    # work. The capture does not hold input values and some steps have no
+    # measured locator; both belong here, where the project already says what
+    # it did not see.
+    # The join from a step to its element is TOTAL by construction -- both use
+    # `semantic_key` and the same tag gate -- so a step never fails to resolve.
+    # What a step can lack is a LOCATOR: an element with no id, name, label,
+    # text, dom_path or class yields zero locator candidates, and a generated
+    # script can record that step and not replay it.
+    without_locator = {e.key for e in result.ui_elements if not e.locators}
+    unreplayable = [s for s in result.workflow
+                    if s.element_key and s.element_key in without_locator]
+    if unreplayable:
+        findings.append(Finding(
+            kind="unreplayable_step", severity="warning",
+            message=(f"{len(unreplayable)} workflow step(s) reference an element "
+                     "with no measured locator; a generated script records them "
+                     "and cannot replay them"),
+            count=len(unreplayable),
+            evidence=Evidence(event_ids=[
+                eid for s in unreplayable[:20] for eid in s.evidence.event_ids[:1]]),
+        ))
+
+    typed = [s for s in result.workflow if s.value_recorded]
+    if typed:
+        findings.append(Finding(
+            kind="workflow_value_gap", severity="info",
+            message=(f"{len(typed)} workflow step(s) typed or chose a value that "
+                     "was not recorded by the capture; a generated script leaves "
+                     "them empty rather than inventing one"),
+            count=len(typed),
+            evidence=Evidence(event_ids=[
+                eid for s in typed[:20] for eid in s.evidence.event_ids[:1]]),
         ))
     return findings

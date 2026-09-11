@@ -351,6 +351,15 @@ def _valider_payload(body: str | None) -> dict[str, Any]:
 
 _STATIC_GET: dict[str, _Response] = {
     "/page2": _html(content.PAGE2_HTML),
+    "/table-demo": _html(content.TABLE_PAGE_HTML),
+    "/interactions": _html(content.INTERACTIONS_PAGE_HTML),
+    "/opens-popup": _html(content.OPENS_POPUP_PAGE_HTML),
+    "/choices": _html(content.CHOICES_PAGE_HTML),
+    "/claims/new": _html(content.CLAIMS_NEW_HTML),
+    "/customers/new": _html(content.CUSTOMERS_NEW_HTML),
+    "/dup-checkboxes": _html(content.DUP_CHECKBOX_HTML),
+    "/prog-anon": _html(content.PROG_ANON_HTML),
+    "/spa-records": _html(content.SPA_RECORDS_HTML),
     "/frame/outer": _html(content.FRAME_OUTER_HTML),
     "/frame/inner": _html(content.FRAME_INNER_HTML),
     "/assets/app.css": _Response(200, CT_CSS, content.APP_CSS.encode("utf-8")),

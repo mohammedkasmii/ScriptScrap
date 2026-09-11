@@ -44,25 +44,35 @@ class EventLogReader:
     process leaves behind and recovering everything before it is the point.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, with_offsets: bool = False) -> None:
         self.path = Path(path)
         self.events: list[Event] = []
         self.problems: list[LogProblem] = []
+        #: event_id -> (byte_offset, byte_length), only when requested.
+        #: Positions are BYTES, not characters: a multi-byte payload would
+        #: otherwise drift the index and return the wrong event.
+        self.offsets: dict[str, tuple[int, int]] = {}
+        self._with_offsets = with_offsets
         self._load()
 
     def _load(self) -> None:
         if not self.path.exists():
             raise FileNotFoundError(self.path)
 
-        with self.path.open("r", encoding="utf-8") as handle:
-            lines = handle.readlines()
+        # Read binary so byte positions are exact. Decoding per line costs the
+        # same as letting the io layer do it and is what makes an offset
+        # meaningful, so there is one parser rather than an indexing variant.
+        with self.path.open("rb") as handle:
+            raw_lines = handle.readlines()
 
-        for number, line in enumerate(lines, start=1):
-            stripped = line.strip()
-            if not stripped:
+        offset = 0
+        for number, raw_line in enumerate(raw_lines, start=1):
+            start, offset = offset, offset + len(raw_line)
+            body = raw_line.rstrip(b"\r\n")
+            if not body.strip():
                 continue
-            is_last = number == len(lines)
-            if not line.endswith("\n") and is_last:
+            is_last = number == len(raw_lines)
+            if not raw_line.endswith(b"\n") and is_last:
                 # A process killed mid-write leaves a partial final line.
                 # Everything before it is still valid evidence.
                 self.problems.append(
@@ -71,14 +81,18 @@ class EventLogReader:
                 )
                 continue
             try:
-                raw = json.loads(stripped)
-            except json.JSONDecodeError as exc:
+                raw = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 self.problems.append(LogProblem(number, "invalid_json", str(exc)))
                 continue
             try:
-                self.events.append(Event.from_dict(raw))
+                event = Event.from_dict(raw)
             except ValueError as exc:
                 self.problems.append(LogProblem(number, "invalid_envelope", str(exc)))
+                continue
+            self.events.append(event)
+            if self._with_offsets:
+                self.offsets[event.event_id] = (start, len(body))
 
     # -- access ------------------------------------------------------------
     def __len__(self) -> int:

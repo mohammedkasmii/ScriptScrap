@@ -1,9 +1,12 @@
 """Append-only event spine.
 
-M1 runs this in DUAL-WRITE mode: the existing investigator structures remain the
-behavioural authority and events are emitted alongside them. Nothing reads the
-event log to produce investigator output yet -- the model is being proven against
-real runs first.
+`events.jsonl` is the only record a session produces. It was dual-written
+alongside nine legacy JSON outputs while the model was proven against real
+runs; those were retired once `scriptscrap analyze` derived everything they
+stated, with the event ids behind each conclusion attached.
+
+Everything downstream -- analysis, the workspace, the generators -- reads this
+log or something rebuildable from it.
 """
 
 from .log import EventLog, new_id

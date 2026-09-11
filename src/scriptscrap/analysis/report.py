@@ -23,9 +23,26 @@ def _table(headers: list[str], rows: list[list[Any]]) -> list[str]:
            "|" + "|".join("---" for _ in headers) + "|"]
     out.extend("| " + " | ".join(str(c) for c in row) + " |" for row in rows[:MAX_ROWS])
     if len(rows) > MAX_ROWS:
-        out.append(f"| _… {len(rows) - MAX_ROWS} more_ |" + " |" * (len(headers) - 1))
+        # Say it plainly. A truncated table read as a complete one is how the
+        # audit's run3 export looked safe: the two elements carrying a password
+        # and a table of names sat at rows 41 and 80.
+        out.append(f"| _{len(rows) - MAX_ROWS} more rows not shown_ |"
+                   + " |" * (len(headers) - 1))
     out.append("")
     return out
+
+
+def _why(sensor: dict[str, Any]) -> str:
+    """Why a sensor is in the state it is, from whichever form is present.
+
+    A local report has the prose. A sanitised one has only how many reasons
+    there were, because each is a derived string rather than a fixed constant.
+    """
+    reasons = sensor.get("reasons")
+    if reasons:
+        return "; ".join(reasons)
+    count = sensor.get("reasons_count")
+    return f"{count} reason(s), text not exported" if count else "-"
 
 
 def render(result: AnalysisResult) -> str:
@@ -169,22 +186,98 @@ def render(result: AnalysisResult) -> str:
              for t in result.transitions],
         )
 
+    # -- forms -------------------------------------------------------------
+    if result.forms:
+        lines += ["## Forms and controls", "",
+                  "Each form the operator used, assembled from every observation "
+                  "of it: the controls and their final values, the submit, and "
+                  "the request and outcome it produced. A secret field records "
+                  "that something was entered, never the value.", ""]
+        for form in result.forms:
+            title = f"`{form.form_id or form.form_key}`"
+            if form.method or form.action:
+                title += f" — {form.method or ''} `{form.action or ''}`"
+            lines += [f"### {title}", ""]
+            lines += _table(
+                ["Control", "Tag", "Type", "Label", "Final value", "State"],
+                [[c.name, c.tag, c.type or "—", c.label or "—",
+                  ("(secret)" if c.secret else (c.selected_label or c.final_value or "—")),
+                  ("checked" if c.checked else "unchecked") if c.checked is not None else "—"]
+                 for c in form.controls])
+            if form.associated_request:
+                req = form.associated_request
+                lines.append(f"- request: `{req.get('method')} {req.get('path')}`")
+            if form.outcome:
+                lines.append(f"- outcome: {form.outcome.get('kind')} "
+                             f"`{form.outcome.get('route') or form.outcome.get('status') or ''}`")
+            lines.append("")
+
+    # -- tables ------------------------------------------------------------
+    if result.tables:
+        lines += ["## Tables", "",
+                  "The tables the operator worked, reconstructed from the "
+                  "interactions with them: identity, columns, the rows actually "
+                  "observed, the row actions, and the sort/filter/paginate "
+                  "operations performed. Rows are those the operator touched, "
+                  "not every row the table ever held.", ""]
+        for tbl in result.tables:
+            title = f"`{tbl.table_id or tbl.table_key}`"
+            if tbl.caption:
+                title += f" — {tbl.caption}"
+            lines += [f"### {title}", ""]
+            if tbl.columns:
+                lines.append(f"- columns: {', '.join('`' + c + '`' for c in tbl.columns if c)}")
+            if tbl.row_actions:
+                lines.append(f"- row actions: {', '.join(tbl.row_actions)}")
+            if tbl.operations:
+                lines.append("- operations: "
+                             + ", ".join(f"{k}×{v}" for k, v in tbl.operations.items()))
+            lines.append("")
+            lines += _table(
+                ["Row"] + [c or "—" for c in (tbl.columns or [])],
+                [[r.get("row_id") or r.get("row_index")] + list(r.get("cells") or [])
+                 for r in tbl.rows])
+
+    # -- inferred activities ----------------------------------------------
+    if result.segments:
+        lines += ["## Inferred activities", "",
+                  "The session, split into probable business activities from idle "
+                  "gaps, form submissions and route structure. This is an "
+                  "**interpretation** of the timeline, not a rewrite of it: the "
+                  "ordered workflow above is intact, and each activity cites the "
+                  "raw events behind it. `confidence` reflects how intentional the "
+                  "boundary evidence was.", ""]
+        lines += _table(
+            ["#", "Activity", "Actions", "Began", "Ended", "Conf"],
+            [[s.index, s.label, s.action_count, s.boundary_reason, s.outcome,
+              f"{s.confidence:.2f}"] for s in result.segments],
+        )
+
     # -- capture health ----------------------------------------------------
     if result.health:
         health = result.health
+        # A sanitised result carries `overall_code` and per-sensor counts
+        # instead of the prose `overall` and `reasons`, because those are
+        # derived strings rather than fixed constants. This renders either,
+        # so one function serves both the local report and the shared one.
+        overall = health.get("overall") or health.get("overall_code", "unknown")
         lines += ["## Capture health", "",
-                  f"**{health['overall']}**", "",
+                  f"**{overall}**", "",
                   "Whether the application did nothing, or ScriptScrap failed to "
                   "see it. Statuses are categories; a percentage appears only "
                   "where a real denominator exists.", ""]
         lines += _table(
             ["Sensor", "Status", "Why"],
-            [[s_["sensor"], s_["status"], "; ".join(s_["reasons"]) or "-"]
-             for s_ in health["sensors"]],
+            [[s_.get("sensor", "-"), s_.get("status", "-"), _why(s_)]
+             for s_ in health.get("sensors", [])],
         )
         if health.get("notes"):
             lines += ["### Notes", ""]
             lines += [f"- {n}" for n in health["notes"]] + [""]
+        elif health.get("notes_count"):
+            lines += ["### Notes", "",
+                      f"_{health['notes_count']} note(s); the text is not in a "
+                      "sanitised export._", ""]
 
     # -- forensic scripts --------------------------------------------------
     if result.scripts:

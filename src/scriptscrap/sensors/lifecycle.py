@@ -7,11 +7,13 @@ the page the operator started on. A page-only listener would miss them entirely.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import Any
 
 from ..events import EventType, Source
 from .identity import PageRegistry
+from .scope import URL_PAYLOAD_KEYS, strip_query
 
 # Console output above this is clipped. A page that logs a megabyte object
 # should not be able to dominate the event log.
@@ -29,6 +31,34 @@ class LifecycleSensor:
         self.console_messages = 0
         self.page_exceptions = 0
         self.downloads = 0
+        self.dialogs = 0
+
+    # -- engagement boundary ------------------------------------------------
+    def _scoped(self, **payload: Any) -> dict[str, Any]:
+        """Reduce any URL in this payload that lies outside the engagement.
+
+        Only the URL half of the runtime probe's reduction applies here. That
+        sensor rebuilds an out-of-scope payload from an allowlist because it
+        carries bodies, header names and typed values; a lifecycle payload
+        carries none of those, so its URLs are the only thing that can leak.
+
+        The event is kept and marked rather than dropped: "a third-party iframe
+        attached here" is the same forensic fact the network path preserves,
+        and losing it would make an out-of-scope page look silent.
+        """
+        scope = getattr(self.engine, "scope", None)
+        if scope is None:
+            return payload
+        reduced = False
+        for key in URL_PAYLOAD_KEYS:
+            value = payload.get(key)
+            if isinstance(value, str) and value and not scope.contains(value):
+                payload[key] = strip_query(value)
+                reduced = True
+        if reduced:
+            payload["scope"] = "out_of_scope"
+            payload["evidence_reduced"] = True
+        return payload
 
     # -- attachment --------------------------------------------------------
     async def attach(self, context: Any) -> None:
@@ -60,9 +90,11 @@ class LifecycleSensor:
         self.engine.emit_event(
             Source.PLAYWRIGHT,
             EventType.PAGE_OPENED,
-            page_id=page_id,
-            url=getattr(page, "url", None),
-            discovered_via="context" if from_context else "explicit",
+            **self._scoped(
+                page_id=page_id,
+                url=getattr(page, "url", None),
+                discovered_via="context" if from_context else "explicit",
+            ),
         )
 
         page.on("close", lambda p=page: self._on_close(p))
@@ -73,6 +105,7 @@ class LifecycleSensor:
         page.on("console", lambda m: self._on_console(m, page_id))
         page.on("pageerror", lambda e: self._on_page_error(e, page_id))
         page.on("download", lambda d: self._on_download(d, page_id))
+        page.on("dialog", lambda d: self._on_dialog(d, page_id))
         return page_id
 
     # -- handlers ----------------------------------------------------------
@@ -86,9 +119,11 @@ class LifecycleSensor:
         self.engine.emit_event(
             Source.PLAYWRIGHT,
             EventType.POPUP_OPENED,
-            page_id=popup_id,
-            opener_page_id=opener_page_id,
-            url=getattr(popup, "url", None),
+            **self._scoped(
+                page_id=popup_id,
+                opener_page_id=opener_page_id,
+                url=getattr(popup, "url", None),
+            ),
         )
 
     def _on_frame_attached(self, frame: Any, page_id: str | None) -> None:
@@ -96,11 +131,13 @@ class LifecycleSensor:
         self.engine.emit_event(
             Source.PLAYWRIGHT,
             EventType.FRAME_ATTACHED,
-            page_id=page_id,
-            frame_id=frame_id,
-            parent_frame_id=self.registry.parent_frame_id(frame_id),
-            url=getattr(frame, "url", None),
-            name=getattr(frame, "name", None) or None,
+            **self._scoped(
+                page_id=page_id,
+                frame_id=frame_id,
+                parent_frame_id=self.registry.parent_frame_id(frame_id),
+                url=getattr(frame, "url", None),
+                name=getattr(frame, "name", None) or None,
+            ),
         )
 
     def _on_frame_detached(self, frame: Any, page_id: str | None) -> None:
@@ -126,19 +163,23 @@ class LifecycleSensor:
         self.engine.emit_event(
             Source.PLAYWRIGHT,
             EventType.FRAME_NAVIGATED,
-            page_id=page_id,
-            frame_id=frame_id,
-            parent_frame_id=self.registry.parent_frame_id(frame_id),
-            url=getattr(frame, "url", None),
-            is_main_frame=is_main,
+            **self._scoped(
+                page_id=page_id,
+                frame_id=frame_id,
+                parent_frame_id=self.registry.parent_frame_id(frame_id),
+                url=getattr(frame, "url", None),
+                is_main_frame=is_main,
+            ),
         )
         if is_main:
             self.engine.emit_event(
                 Source.PLAYWRIGHT,
                 EventType.NAVIGATION_COMMITTED,
-                page_id=page_id,
-                frame_id=frame_id,
-                url=getattr(frame, "url", None),
+                **self._scoped(
+                    page_id=page_id,
+                    frame_id=frame_id,
+                    url=getattr(frame, "url", None),
+                ),
             )
 
     def _on_console(self, message: Any, page_id: str | None) -> None:
@@ -178,15 +219,70 @@ class LifecycleSensor:
             stack=(getattr(error, "stack", None) or "")[:MAX_CONSOLE_TEXT] or None,
         )
 
+    def _on_dialog(self, dialog: Any, page_id: str | None) -> None:
+        """A JavaScript dialog: observe it, then dismiss it.
+
+        The automation layer intercepts alert/confirm/prompt/beforeunload -- the
+        native dialog never reaches the employee, whether or not a handler is
+        registered (with none, Playwright auto-dismisses). So the honest record
+        is the dialog's type, message and default, plus the recorder's OWN
+        handling, and a capture gap stating the employee's real choice cannot be
+        observed under automation. Dismiss matches the no-handler default, so
+        registering this handler does not change behaviour.
+        """
+        self.dialogs += 1
+        dtype = None
+        message = None
+        default_value = None
+        with contextlib.suppress(Exception):
+            dtype = dialog.type
+        with contextlib.suppress(Exception):
+            message = dialog.message
+        with contextlib.suppress(Exception):
+            default_value = dialog.default_value
+        # Dismiss asynchronously: in the async API `dialog.dismiss()` is a
+        # coroutine, and the triggering call (confirm/alert) blocks until the
+        # dialog is handled. Scheduling the await lets the click proceed while
+        # still dismissing -- matching the no-handler default.
+        handled = "dismissed"
+        try:
+            asyncio.get_running_loop().create_task(self._dismiss_dialog(dialog))
+        except RuntimeError:
+            handled = "unhandled"
+        self.engine.emit_event(
+            Source.PLAYWRIGHT,
+            EventType.DIALOG,
+            page_id=page_id,
+            dialog_type=dtype,
+            message=message[:MAX_CONSOLE_TEXT] if isinstance(message, str) else message,
+            default_value=default_value,
+            handling=handled,
+            handled_by="recorder",
+        )
+        # The one thing we cannot know: what the employee would have chosen.
+        self.engine.emit_capture_gap(
+            "dialog_choice_unobservable",
+            dialog_type=dtype,
+            note=("a JavaScript dialog was intercepted by the automation layer; "
+                  "the recorder dismissed it (the no-handler default) and the "
+                  "employee's real accept/dismiss choice is not observable"),
+        )
+
+    async def _dismiss_dialog(self, dialog: Any) -> None:
+        with contextlib.suppress(Exception):
+            await dialog.dismiss()
+
     def _on_download(self, download: Any, page_id: str | None) -> None:
         self.downloads += 1
         # Metadata only. File content never enters the event log.
         self.engine.emit_event(
             Source.PLAYWRIGHT,
             EventType.DOWNLOAD,
-            page_id=page_id,
-            url=getattr(download, "url", None),
-            suggested_filename=getattr(download, "suggested_filename", None),
+            **self._scoped(
+                page_id=page_id,
+                url=getattr(download, "url", None),
+                suggested_filename=getattr(download, "suggested_filename", None),
+            ),
         )
 
     def stats(self) -> dict[str, Any]:
@@ -196,4 +292,5 @@ class LifecycleSensor:
             "console_messages": self.console_messages,
             "page_exceptions": self.page_exceptions,
             "downloads": self.downloads,
+            "dialogs": self.dialogs,
         }

@@ -31,6 +31,9 @@ build-backend = "uv_build"
 module-name = "scriptscrap"
 module-root = "src"
 
+# `ruff format` is NOT part of the gate. It would reformat 106 of 139 files, and
+# the decision to adopt it belongs on a quiet tree in a commit of its own --
+# see docs/known-limitations.md. `ruff check` IS the gate and must stay green.
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -45,7 +48,8 @@ extend-exclude = [
 select = ["E", "F", "B", "I", "UP", "S", "C4", "SIM", "RET", "PTH"]
 ignore = [
     "S101",  # assert is the point in tests
-    "E501",  # line length is handled by the formatter
+    "E501",  # long lines are tolerated; the 100-char target is a guide. NOT
+             # "handled by the formatter" -- see the note above [tool.ruff].
 ]
 
 [tool.ruff.lint.per-file-ignores]

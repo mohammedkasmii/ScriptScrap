@@ -470,6 +470,11 @@ window.recalculerFixture = recalculerFixture;
     byId("btn-etat-resume").addEventListener("click", allerResume);
     rendreBoutonInstable();
 
+    byId("btn-icon").addEventListener("click", function () {
+      setResultat("icone");
+    });
+    initialiserCombobox();
+
     attacherShadow();
     enregistrerHandlersJQuery();
     peuplerGarages();
@@ -642,6 +647,32 @@ window.recalculerFixture = recalculerFixture;
     hote.appendChild(bouton);
   }
 
+  function initialiserCombobox() {
+    var combo = byId("agent-combo");
+    var list = byId("agent-list");
+    if (!combo || !list) {
+      return;
+    }
+    combo.addEventListener("click", function () {
+      var open = combo.getAttribute("aria-expanded") === "true";
+      combo.setAttribute("aria-expanded", open ? "false" : "true");
+      list.hidden = open;
+    });
+    list.querySelectorAll('[role="option"]').forEach(function (option) {
+      option.addEventListener("click", function () {
+        list.querySelectorAll('[role="option"]').forEach(function (other) {
+          other.setAttribute("aria-selected", "false");
+        });
+        option.setAttribute("aria-selected", "true");
+        combo.setAttribute("aria-activedescendant", option.id);
+        combo.setAttribute("aria-expanded", "false");
+        combo.textContent = option.textContent;
+        list.hidden = true;
+        setResultat("agent=" + option.getAttribute("data-value"));
+      });
+    });
+  }
+
   function telecharger() {
     // A real navigation to an attachment response, so Playwright raises a
     // download event rather than a navigation.
@@ -716,8 +747,33 @@ MAIN_PAGE_HTML = """<!DOCTYPE html>
 
   <input type="password" id="pw" name="pw" value="">
 
+  <label for="justificatif">Justificatif</label>
+  <input type="file" id="justificatif" name="justificatif">
+
   <button type="submit" id="btn-submit">Envoyer</button>
 </form>
+
+<!-- A button whose click lands on a decorative child: the observer must
+     normalise the icon/span target up to the button. data-testid is the most
+     stable locator a page can offer, so one control carries it. -->
+<button type="button" id="btn-icon" data-testid="icon-action">
+  <svg viewBox="0 0 8 8" width="8" height="8"><path d="M0 0h8v8H0z"></path></svg>
+  <span class="btn-icon-label">Action icone</span>
+</button>
+
+<!-- A custom ARIA combobox: no native <select> value, only accessible state.
+     Offline analysis connects the trigger to the listbox it controls and to
+     the option the operator selects. -->
+<div id="combo-wrap">
+  <span id="combo-label">Agent</span>
+  <div id="agent-combo" role="combobox" aria-expanded="false"
+       aria-controls="agent-list" aria-haspopup="listbox"
+       aria-labelledby="combo-label" tabindex="0">Choisir un agent</div>
+  <ul id="agent-list" role="listbox" aria-labelledby="combo-label" hidden>
+    <li role="option" id="opt-agent-1" data-value="ag-1">Agent Un</li>
+    <li role="option" id="opt-agent-2" data-value="ag-2">Agent Deux</li>
+  </ul>
+</div>
 
 <div id="actions">
   <button type="button" id="btn-charger">Charger</button>
@@ -808,6 +864,170 @@ window.__page2ParseTimeCall = page2ParseTimeFixture(21);
 </html>
 """
 
+# A form with id-less radio and checkbox groups (controls sharing a name but no
+# id) plus a genuinely anonymous form (no id, no name). Exercises radio-group
+# aggregation, distinct same-named checkboxes, and anonymous-form event
+# attribution (DOM inventory + input + submit resolving to one entry).
+CHOICES_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Choices</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1 id="choices-title">Choices</h1>
+
+<form id="prefs-form" onsubmit="return false;">
+  <fieldset>
+    <legend>Plan</legend>
+    <label><input type="radio" name="plan" value="basic"> Basic</label>
+    <label><input type="radio" name="plan" value="pro" checked> Pro</label>
+    <label><input type="radio" name="plan" value="max"> Max</label>
+  </fieldset>
+  <fieldset>
+    <legend>Toppings</legend>
+    <label><input type="checkbox" name="topping" value="cheese"> Cheese</label>
+    <label><input type="checkbox" name="topping" value="olives"> Olives</label>
+    <label><input type="checkbox" name="topping" value="ham"> Ham</label>
+  </fieldset>
+  <button type="submit" id="prefs-submit">Save preferences</button>
+</form>
+
+<!-- A genuinely anonymous form: no id and no name attribute. -->
+<form onsubmit="return false;">
+  <label>Note <input type="text" name="note"></label>
+  <button type="submit" id="anon-submit">Save note</button>
+</form>
+
+<script>
+document.documentElement.setAttribute("data-fixture-choices-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
+# Two routes that serve DIFFERENT documents carrying the SAME form id, so a
+# same-tab navigation between them proves the catalog does not merge them.
+def _same_id_form_page(title, route, field_label, field_name, next_route,
+                       next_label):
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - {title}</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1>{title}</h1>
+<form id="entity-form" method="POST" action="{route}">
+  <label>{field_label} <input type="text" id="entity-field" name="{field_name}"></label>
+  <button type="submit" id="entity-submit">Submit</button>
+</form>
+<a id="go-next" href="{next_route}">{next_label}</a>
+<script>
+document.documentElement.setAttribute("data-fixture-entity-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
+CLAIMS_NEW_HTML = _same_id_form_page(
+    "New Claim", "/claims/new", "Claim reference", "claim_ref",
+    "/customers/new", "Go to new customer")
+CUSTOMERS_NEW_HTML = _same_id_form_page(
+    "New Customer", "/customers/new", "Customer name", "customer_name",
+    "/claims/new", "Go to new claim")
+
+
+# Duplicate checkboxes: two share a name AND the implicit "on" value but have
+# different ids; two more share a name and value with NO ids (distinguished only
+# by structural path). Each must stay a distinct choice.
+DUP_CHECKBOX_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Duplicate Checkboxes</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1>Flags</h1>
+<form id="flags-form" onsubmit="return false;">
+  <label><input type="checkbox" id="opt-a" name="opt"> Alpha</label>
+  <label><input type="checkbox" id="opt-b" name="opt"> Beta</label>
+  <label><input type="checkbox" name="tag"> Red</label>
+  <label><input type="checkbox" name="tag"> Blue</label>
+  <button type="submit" id="flags-submit">Save flags</button>
+</form>
+<script>
+document.documentElement.setAttribute("data-fixture-dup-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
+# An anonymous form (no id, no name) submitted PROGRAMMATICALLY via form.submit(),
+# which fires no native submit event -- only the prototype wrapper observes it.
+PROG_ANON_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Programmatic Submit</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1>Programmatic</h1>
+<form method="GET" action="/prog-anon">
+  <label>Memo <input type="text" name="memo"></label>
+</form>
+<button id="prog-go" type="button">Submit programmatically</button>
+<script>
+document.getElementById("prog-go").addEventListener("click", function () {
+  document.querySelector("form:not([id])").submit();   // no native submit event
+});
+document.documentElement.setAttribute("data-fixture-prog-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
+# One SPA document whose route changes via pushState to two exact records that
+# share a structural shape (/records/{id}). The same form id must yield two
+# occurrences, one per exact location.
+SPA_RECORDS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - SPA Records</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1 id="record-title">Records</h1>
+<form id="entity-form" onsubmit="return false;">
+  <label>Record <input type="text" id="record-field" name="record"></label>
+</form>
+<button id="to-123" type="button">Open 123</button>
+<button id="to-456" type="button">Open 456</button>
+<script>
+document.getElementById("to-123").addEventListener("click", function () {
+  history.pushState({}, "", "/records/123");
+  document.getElementById("record-title").textContent = "Record 123";
+});
+document.getElementById("to-456").addEventListener("click", function () {
+  history.pushState({}, "", "/records/456");
+  document.getElementById("record-title").textContent = "Record 456";
+});
+document.documentElement.setAttribute("data-fixture-spa-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+
 FRAME_OUTER_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -843,6 +1063,222 @@ FRAME_INNER_HTML = """<!DOCTYPE html>
   <option value="in-1">Interne Un</option>
   <option value="in-2">Interne Deux</option>
 </select>
+</body>
+</html>
+"""
+
+TABLE_PAGE_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Table</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1 id="titre-table">Dossiers</h1>
+
+<input type="search" id="table-filter" name="filtre"
+       placeholder="Filtrer les dossiers" aria-controls="dossiers">
+
+<table id="dossiers" aria-label="Dossiers">
+  <caption>Dossiers ouverts</caption>
+  <thead>
+    <tr>
+      <th id="col-id" data-sort="id">Reference</th>
+      <th id="col-client" data-sort="client">Client</th>
+      <th id="col-montant" data-sort="montant">Montant</th>
+      <th id="col-actions">Actions</th>
+    </tr>
+  </thead>
+  <tbody id="dossiers-body">
+    <tr data-id="D-1001"><td>D-1001</td><td>Alpha</td><td>1200</td>
+      <td><button type="button" class="row-edit" data-id="D-1001">Editer</button></td></tr>
+    <tr data-id="D-1002"><td>D-1002</td><td>Beta</td><td>800</td>
+      <td><button type="button" class="row-edit" data-id="D-1002">Editer</button></td></tr>
+    <tr data-id="D-1003"><td>D-1003</td><td>Gamma</td><td>450</td>
+      <td><button type="button" class="row-edit" data-id="D-1003">Editer</button></td></tr>
+  </tbody>
+</table>
+
+<div id="pagination">
+  <button type="button" id="prev-page" aria-controls="dossiers">Precedent</button>
+  <span id="page-indicator">Page 1</span>
+  <button type="button" id="next-page" aria-controls="dossiers">Suivant</button>
+</div>
+<div id="table-status"></div>
+
+<script>
+(function () {
+  "use strict";
+  var page = 1;
+  function status(text) { document.getElementById("table-status").textContent = text; }
+  document.getElementById("table-filter").addEventListener("input", function (ev) {
+    var term = ev.target.value.toLowerCase();
+    var rows = document.querySelectorAll("#dossiers-body tr");
+    for (var i = 0; i < rows.length; i += 1) {
+      rows[i].hidden = term && rows[i].textContent.toLowerCase().indexOf(term) === -1;
+    }
+    status("filtre=" + term);
+  });
+  var headers = document.querySelectorAll("#dossiers thead th[data-sort]");
+  for (var h = 0; h < headers.length; h += 1) {
+    headers[h].addEventListener("click", function (ev) {
+      status("tri=" + ev.currentTarget.getAttribute("data-sort"));
+    });
+  }
+  var edits = document.querySelectorAll(".row-edit");
+  for (var e = 0; e < edits.length; e += 1) {
+    edits[e].addEventListener("click", function (ev) {
+      status("editer=" + ev.currentTarget.getAttribute("data-id"));
+    });
+  }
+  document.getElementById("next-page").addEventListener("click", function () {
+    page += 1; document.getElementById("page-indicator").textContent = "Page " + page;
+  });
+  document.getElementById("prev-page").addEventListener("click", function () {
+    if (page > 1) { page -= 1; }
+    document.getElementById("page-indicator").textContent = "Page " + page;
+  });
+  document.documentElement.setAttribute("data-fixture-table-ready", "true");
+})();
+</script>
+</body>
+</html>
+"""
+
+OPENS_POPUP_PAGE_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>ScriptScrap Fixture - Opens Popup</title></head>
+<body>
+<h1 id="titre-opener">Ouverture automatique</h1>
+<script>
+/* Opens a popup DURING this page's initial load, so coverage started before
+   the first navigation must still catch it. */
+window.__fixtureAutoPopup = window.open("/page2?auto=1", "autopopup");
+document.documentElement.setAttribute("data-fixture-opener-ready", "true");
+</script>
+</body>
+</html>
+"""
+
+INTERACTIONS_PAGE_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Interactions</title>
+<link rel="stylesheet" href="/assets/app.css">
+<style>
+#menu { display: none; }
+#menu.open { display: block; }
+#virt-wrap { height: 180px; overflow: auto; border: 1px solid #999; width: 320px; }
+#virt-spacer { position: relative; }
+#drop-target { border: 2px dashed #999; padding: 10px; min-height: 24px; }
+</style>
+</head>
+<body>
+<h1 id="titre-interactions">Interactions</h1>
+
+<!-- Hover-opened menu: the trigger declares aria-haspopup, and the menu shows
+     on hover. The probe records the hover on the menu trigger. -->
+<div id="menu-region">
+  <button type="button" id="menu-trigger" aria-haspopup="menu"
+          aria-controls="menu">Actions</button>
+  <ul id="menu" role="menu" aria-labelledby="menu-trigger">
+    <li role="menuitem" id="menu-open">Ouvrir</li>
+    <li role="menuitem" id="menu-archive">Archiver</li>
+  </ul>
+</div>
+
+<!-- A JavaScript dialog: confirm(). The automation layer intercepts it; the
+     recorder observes type/message and dismisses. -->
+<button type="button" id="btn-confirm">Confirmer une action</button>
+<div id="confirm-result"></div>
+
+<!-- Drag and drop. Playwright cannot drive native HTML5 DnD, so a button lets
+     the page fire the real DragEvent sequence a browser produces during a drag;
+     the probe observes the same listener path either way. -->
+<div id="drag-src" draggable="true" data-item="dossier-7">Dossier 7</div>
+<div id="drop-target" aria-label="Corbeille">Deposer ici</div>
+<button type="button" id="sim-drag">Glisser vers la corbeille</button>
+<div id="drop-result"></div>
+
+<!-- A genuinely virtualized table: only a window of rows is in the DOM, and
+     which rows are rendered changes on scroll. -->
+<div id="virt-wrap" aria-label="Grand tableau">
+  <div id="virt-spacer">
+    <table id="virt-table" role="grid" aria-label="Grand tableau">
+      <caption>Grand tableau</caption>
+      <thead><tr><th>Ref</th><th>Client</th><th>Montant</th></tr></thead>
+      <tbody id="virt-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  // Hover menu.
+  var trigger = document.getElementById("menu-trigger");
+  var menu = document.getElementById("menu");
+  trigger.addEventListener("mouseover", function () { menu.classList.add("open"); });
+  trigger.addEventListener("focus", function () { menu.classList.add("open"); });
+
+  // Dialog.
+  document.getElementById("btn-confirm").addEventListener("click", function () {
+    var ok = window.confirm("Proceder a l'archivage ?");
+    document.getElementById("confirm-result").textContent = "confirm=" + ok;
+  });
+
+  // Drag and drop.
+  var src = document.getElementById("drag-src");
+  var target = document.getElementById("drop-target");
+  src.addEventListener("dragstart", function (ev) {
+    ev.dataTransfer.setData("text/plain", src.getAttribute("data-item"));
+  });
+  target.addEventListener("dragover", function (ev) { ev.preventDefault(); });
+  target.addEventListener("drop", function (ev) {
+    ev.preventDefault();
+    document.getElementById("drop-result").textContent =
+      "drop=" + ev.dataTransfer.getData("text/plain");
+  });
+  document.getElementById("sim-drag").addEventListener("click", function () {
+    var dt = new DataTransfer();
+    dt.setData("text/plain", src.getAttribute("data-item"));
+    src.dispatchEvent(new DragEvent("dragstart",
+      { bubbles: true, cancelable: true, dataTransfer: dt }));
+    target.dispatchEvent(new DragEvent("drop",
+      { bubbles: true, cancelable: true, dataTransfer: dt }));
+    src.dispatchEvent(new DragEvent("dragend",
+      { bubbles: true, cancelable: true, dataTransfer: dt }));
+  });
+
+  // Virtualized table: 60 rows of data, ~12 rendered at a time.
+  var DATA = [];
+  for (var i = 1; i <= 60; i += 1) {
+    DATA.push({ id: "V-" + i, client: "Client " + i, montant: i * 10 });
+  }
+  var ROW_H = 24, WINDOW = 12;
+  var body = document.getElementById("virt-body");
+  var spacer = document.getElementById("virt-spacer");
+  var wrap = document.getElementById("virt-wrap");
+  spacer.style.height = (DATA.length * ROW_H) + "px";
+  function render() {
+    var start = Math.floor(wrap.scrollTop / ROW_H);
+    var end = Math.min(DATA.length, start + WINDOW);
+    var html = "";
+    for (var j = start; j < end; j += 1) {
+      var d = DATA[j];
+      html += '<tr data-id="' + d.id + '" style="position:absolute;top:' +
+        (j * ROW_H) + 'px"><td>' + d.id + '</td><td>' + d.client +
+        '</td><td>' + d.montant + '</td></tr>';
+    }
+    body.innerHTML = html;
+  }
+  wrap.addEventListener("scroll", render);
+  render();
+  document.documentElement.setAttribute("data-fixture-interactions-ready", "true");
+})();
+</script>
 </body>
 </html>
 """

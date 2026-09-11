@@ -335,14 +335,114 @@
     }
   }
 
+  // A click frequently lands on a decorative child -- an icon, an SVG path, a
+  // <b> inside a button. The actionable thing is the nearest ancestor that a
+  // person can operate, so normalise to it. Both are recorded when they differ,
+  // because the original target is evidence of exactly where the pointer went.
+  const ACTIONABLE = "a,button,input,select,textarea,option,label,summary," +
+    "[role],[contenteditable],[tabindex],[onclick]";
+
+  function actionableAncestor(el) {
+    try {
+      if (!el || el.nodeType !== 1 || !el.closest) return el;
+      const found = el.closest(ACTIONABLE);
+      return found || el;
+    } catch (e) {
+      return el;
+    }
+  }
+
+  // Accessible-state and relationship attributes a custom control uses instead
+  // of native state -- an ARIA combobox is `aria-expanded` on a <div>, not an
+  // <input> with a real value. Kept verbatim so offline analysis can connect a
+  // trigger to the listbox it controls and the option the operator chose.
+  const ARIA_STATE = ["aria-expanded", "aria-controls", "aria-selected",
+    "aria-checked", "aria-activedescendant", "aria-haspopup", "aria-pressed",
+    "aria-current", "aria-disabled"];
+
+  // When an action happens inside a table (native or an ARIA grid), the table
+  // is part of what the action MEANS -- a click on a row's Edit button, a sort
+  // on a column header, a filter typed above the rows. Captured so offline
+  // analysis can reconstruct the table and connect the operator's actions to
+  // it. Bounded: a virtualised table can hold thousands of rows, so only the
+  // interacted row and the header row are read.
+  function tableContext(el) {
+    try {
+      if (!el || !el.closest) return null;
+      let table = el.closest("table,[role=table],[role=grid],[role=treegrid]");
+      // A filter box or a pager usually sits OUTSIDE the table it drives and
+      // declares the relationship with aria-controls. Resolve it, so those
+      // operations attach to the table they act on rather than being lost.
+      let via = null;
+      if (!table) {
+        const controls = el.getAttribute && el.getAttribute("aria-controls");
+        if (controls) {
+          const target = document.getElementById(controls);
+          if (target && target.closest) {
+            table = target.closest("table,[role=table],[role=grid],[role=treegrid]")
+              || (/(table|grid)/i.test(target.getAttribute("role") || "")
+                  || target.tagName === "TABLE" ? target : null);
+            if (table) via = "aria-controls";
+          }
+        }
+      }
+      if (!table) return null;
+      const ctx = {
+        table_id: table.id || (table.getAttribute
+          && table.getAttribute("aria-label")) || null,
+      };
+      if (via) ctx.via = via;
+      const caption = table.querySelector && table.querySelector("caption");
+      if (caption) ctx.caption = clip((caption.textContent || "").trim().slice(0, 120));
+
+      let headers = [];
+      const thead = table.querySelector && table.querySelector("thead");
+      const scope = thead || table;
+      if (scope.querySelectorAll) {
+        headers = Array.prototype.slice.call(
+          scope.querySelectorAll("th,[role=columnheader]"), 0, 40);
+      }
+      if (headers.length) {
+        ctx.columns = headers.map((h) =>
+          clip((h.innerText || h.textContent || "").trim().slice(0, 60)));
+      }
+
+      const row = el.closest("tr,[role=row]");
+      if (row) {
+        ctx.row_id = row.id || (row.getAttribute && (row.getAttribute("data-id")
+          || row.getAttribute("data-row-id"))) || null;
+        const cells = row.querySelectorAll
+          ? Array.prototype.slice.call(
+              row.querySelectorAll("td,th,[role=cell],[role=gridcell]"), 0, 40)
+          : [];
+        if (cells.length) {
+          ctx.cells = cells.map((c) =>
+            clip((c.innerText || c.textContent || "").trim().slice(0, 80)));
+        }
+        if (row.parentElement) {
+          const kin = Array.prototype.filter.call(
+            row.parentElement.children, (r) => r.tagName === row.tagName);
+          ctx.row_index = kin.indexOf(row);
+        }
+        // Whether the interacted element is itself a header cell -- the signal
+        // that a click was a column sort rather than a row action.
+        ctx.on_header = !!(el.closest && el.closest("th,[role=columnheader],thead"));
+      }
+      return ctx;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function fingerprint(el) {
     if (!el || el.nodeType !== 1) return null;
     const tag = el.tagName.toLowerCase();
+    const type = el.getAttribute ? el.getAttribute("type") : null;
     const fp = {
       tag: tag,
       id: el.id || null,
       name: el.getAttribute ? el.getAttribute("name") : null,
-      type: el.getAttribute ? el.getAttribute("type") : null,
+      type: type,
       role: el.getAttribute ? el.getAttribute("role") : null,
       class: el.getAttribute ? clip(el.getAttribute("class")) : null,
       placeholder: el.getAttribute ? el.getAttribute("placeholder") : null,
@@ -353,11 +453,51 @@
       required: !!el.required,
     };
     try {
+      // Control state, so a checkbox/radio/option/expander carries what it was
+      // in at the moment it was used.
+      const t = (type || "").toLowerCase();
+      if ((t === "checkbox" || t === "radio") && typeof el.checked === "boolean") {
+        fp.checked = el.checked;
+      }
+      if (tag === "option") fp.selected = !!el.selected;
+      if (tag === "select" && el.multiple) fp.multiple = true;
+      const aria = {};
+      if (el.getAttribute) {
+        for (const attr of ARIA_STATE) {
+          const value = el.getAttribute(attr);
+          if (value !== null) aria[attr] = clip(value);
+        }
+      }
+      if (Object.keys(aria).length) fp.aria = aria;
+      // The listbox an option belongs to, so a combobox trigger's aria-controls
+      // can be matched to the exact listbox the chosen option came from --
+      // across a portal, where the listbox is not a DOM ancestor of the trigger.
+      if (fp.role === "option" && el.closest) {
+        const list = el.closest("[role=listbox]");
+        if (list && list.id) fp.listbox = list.id;
+      }
+      // The captured region a control lives in: a real form/fieldset/dialog/
+      // section/region, so a "formless" combobox is grouped by an actual
+      // container identity rather than by its whole frame.
+      if (el.closest) {
+        const region = el.closest(
+          "[role=form],fieldset,[role=dialog],dialog,section,[role=region]");
+        if (region && region.id) fp.region = region.id;
+      }
+    } catch (e) { /* ignore */ }
+    try {
       const text = (el.innerText || el.textContent || "").trim();
       if (text) fp.text = clip(text.slice(0, 120));
     } catch (e) { /* ignore */ }
     try {
-      if (el.form) fp.form = el.form.id || el.form.getAttribute("name") || "(unnamed)";
+      if (el.form) {
+        fp.form = el.form.id || el.form.getAttribute("name") || "(unnamed)";
+        // The owning form's structural path, captured on EVERY event (input,
+        // change, click), not only on submit. It is the same domPath the DOM
+        // scan records for the form, so a field of an anonymous form resolves
+        // to the same catalog key its inventory and its submit do.
+        fp.form_path = domPath(el.form);
+      }
     } catch (e) { /* ignore */ }
     try {
       const data = {};
@@ -381,6 +521,14 @@
       if (el.type === "checkbox" || el.type === "radio") {
         return { checked: !!el.checked, value: clip(el.value) };
       }
+      if (el.type === "file") {
+        // File NAMES and sizes only. Content never enters the capture from
+        // here; this is the metadata that says which files were chosen.
+        const files = el.files ? Array.prototype.map.call(el.files, (f) => ({
+          name: clip(f.name), size: f.size, type: f.type || null,
+        })) : [];
+        return { files: files, count: files.length };
+      }
       if (el.tagName === "SELECT") {
         const opts = Array.prototype.filter.call(el.selectedOptions || [], () => true);
         return {
@@ -393,17 +541,68 @@
     return null;
   }
 
+  // Currently-visible rows of a table, bounded. Used for virtualized tables,
+  // where the DOM holds only the rows near the viewport: harvesting the visible
+  // ones as the operator scrolls reconstructs what they actually saw. Capped
+  // hard, and each row carries a stable id where the markup offers one so the
+  // analysis can deduplicate across scroll events.
+  function visibleTableRows(table, max) {
+    const out = [];
+    try {
+      const rows = table.querySelectorAll("tbody tr,[role=row]");
+      const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+      for (let i = 0; i < rows.length && out.length < max; i++) {
+        const row = rows[i];
+        let rect;
+        try { rect = row.getBoundingClientRect(); } catch (e) { continue; }
+        if (rect.bottom < 0 || rect.top > vh || (rect.width === 0 && rect.height === 0)) {
+          continue;   // not in the viewport
+        }
+        const cells = row.querySelectorAll("td,th,[role=cell],[role=gridcell]");
+        out.push({
+          row_id: row.id || (row.getAttribute && (row.getAttribute("data-id")
+            || row.getAttribute("data-row-id"))) || null,
+          cells: Array.prototype.slice.call(cells, 0, 40).map((c) =>
+            clip((c.innerText || c.textContent || "").trim().slice(0, 80))),
+        });
+      }
+    } catch (e) { /* ignore */ }
+    return out;
+  }
+
   // --- user actions ------------------------------------------------------
+
+  const CLICK_TYPES = { user_click: 1, user_dblclick: 1, user_rightclick: 1 };
 
   function onUserEvent(type, ev) {
     guard("user_event", () => {
-      const el = ev.target;
-      if (!el || el.nodeType !== 1) return;
+      const raw = ev.target;
+      if (!raw || raw.nodeType !== 1) return;
+      // For a click, resolve to the nearest actionable ancestor; the raw target
+      // is kept beside it when they differ, as evidence of where the pointer
+      // actually landed.
+      const el = CLICK_TYPES[type] ? actionableAncestor(raw) : raw;
       const payload = {
         element: fingerprint(el),
         trusted: !!ev.isTrusted,
       };
-      if (type === "user_click") {
+      const tctx = tableContext(el);
+      if (tctx) {
+        // On a table OPERATION -- a sort on a header, a filter/pager wired by
+        // aria-controls -- harvest the rows currently visible, so the analysis
+        // can attribute the new table state to the operation that produced it.
+        if (tctx.on_header || tctx.via === "aria-controls") {
+          const table = el.closest && el.closest(
+            "table,[role=table],[role=grid],[role=treegrid]");
+          const target = table || (tctx.table_id && document.getElementById(tctx.table_id));
+          if (target) tctx.visible_rows = visibleTableRows(target, 60);
+        }
+        payload.table = tctx;
+      }
+      if (CLICK_TYPES[type] && el !== raw) {
+        payload.original_target = fingerprint(raw);
+      }
+      if (CLICK_TYPES[type]) {
         payload.button = ev.button;
         payload.detail = ev.detail;
       }
@@ -412,8 +611,15 @@
       }
       if (type === "user_key") {
         // The key itself is deliberately not recorded for secret fields, and
-        // only structural keys are recorded anywhere -- this is not a keylogger.
+        // only structural keys and modifier shortcuts anywhere -- not a
+        // keylogger.
         payload.key = isSecretField(el) ? null : ev.key;
+        const mods = [];
+        if (ev.ctrlKey) mods.push("Control");
+        if (ev.metaKey) mods.push("Meta");
+        if (ev.altKey) mods.push("Alt");
+        if (ev.shiftKey) mods.push("Shift");
+        if (mods.length) payload.modifiers = mods;
       }
       if (type === "user_submit") {
         payload.action = el.action || null;
@@ -424,6 +630,12 @@
             if (!f.name) return;
             fields.push({
               name: f.name,
+              // id, dom_path and label so a submitted checkbox keys to the same
+              // control its DOM inventory and change events do -- two boxes
+              // sharing a name and value (the implicit "on") stay distinct.
+              id: f.id || null,
+              dom_path: domPath(f),
+              label: labelFor(f),
               tag: f.tagName.toLowerCase(),
               type: f.getAttribute ? f.getAttribute("type") : null,
               value: valueOf(f),
@@ -442,6 +654,8 @@
 
   const USER_EVENTS = [
     ["click", "user_click"],
+    ["dblclick", "user_dblclick"],
+    ["contextmenu", "user_rightclick"],
     ["input", "user_input"],
     ["change", "user_change"],
     ["submit", "user_submit"],
@@ -458,10 +672,120 @@
     }
 
     document.addEventListener("keydown", (ev) => {
-      // Only keys that carry workflow meaning. Not every keystroke.
-      if (ev.key === "Enter" || ev.key === "Escape" || ev.key === "Tab") {
+      // Keys that carry workflow meaning: structural navigation keys, and
+      // modifier shortcuts (Ctrl+S, Cmd+Enter). Not every keystroke -- the
+      // literal character of an ordinary keypress is never recorded here.
+      const structural = ev.key === "Enter" || ev.key === "Escape"
+        || ev.key === "Tab";
+      const shortcut = (ev.ctrlKey || ev.metaKey || ev.altKey)
+        && typeof ev.key === "string" && ev.key.length === 1;
+      if (structural || shortcut) {
         onUserEvent("user_key", ev);
       }
+    }, { capture: true, passive: true });
+
+    // --- hover-opened menus ---------------------------------------------
+    // Only elements that OPEN something on hover, and only once each within a
+    // window, so a mouse crossing the page cannot flood the log. A menu is
+    // recognised by ARIA -- aria-haspopup, or a menu/menubar/menuitem role, or
+    // being inside one.
+    const hoverSeen = new Map();       // element -> last emit time
+    const HOVER_DEDUP_MS = 1500;
+    function hoverTarget(el) {
+      try {
+        return el.closest && el.closest(
+          "[aria-haspopup],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio]");
+      } catch (e) { return null; }
+    }
+    document.addEventListener("pointerover", (ev) => {
+      guard("user_hover", () => {
+        const target = hoverTarget(ev.target);
+        if (!target) return;
+        const now = nowMs();
+        const last = hoverSeen.get(target) || 0;
+        if (now - last < HOVER_DEDUP_MS) return;
+        hoverSeen.set(target, now);
+        if (hoverSeen.size > 200) hoverSeen.clear();   // bounded
+        emit("user_hover", { element: fingerprint(target), trusted: !!ev.isTrusted });
+      });
+    }, { capture: true, passive: true });
+
+    // --- drag and drop ---------------------------------------------------
+    // Field names avoid `source` deliberately: it collides with the event
+    // envelope's own `source` on the Python side.
+    let dragSource = null;
+    document.addEventListener("dragstart", (ev) => {
+      guard("user_drag_start", () => {
+        dragSource = fingerprint(ev.target);
+        emit("user_drag", { phase: "start", drag_source: dragSource,
+                            trusted: !!ev.isTrusted });
+      });
+    }, { capture: true, passive: true });
+    document.addEventListener("drop", (ev) => {
+      guard("user_drag_drop", () => {
+        const dt = ev.dataTransfer;
+        let files = null;
+        try {
+          if (dt && dt.files && dt.files.length) {
+            files = Array.prototype.map.call(dt.files, (f) => ({
+              name: clip(f.name), size: f.size, type: f.type || null }));
+          }
+        } catch (e) { /* ignore */ }
+        emit("user_drag", {
+          phase: "drop", drag_source: dragSource,
+          drag_destination: fingerprint(ev.target), files: files,
+          trusted: !!ev.isTrusted,
+        });
+        dragSource = null;
+      });
+    }, { capture: true, passive: true });
+    document.addEventListener("dragend", (ev) => {
+      guard("user_drag_end", () => {
+        // A dragend with a source still set means the drag was cancelled (no
+        // drop). Recorded so an abandoned drag is distinguishable from one that
+        // landed.
+        if (dragSource) {
+          emit("user_drag", { phase: "cancel", drag_source: dragSource,
+                              trusted: !!ev.isTrusted });
+          dragSource = null;
+        }
+      });
+    }, { capture: true, passive: true });
+
+    // --- meaningful scrolling / virtualized rows ------------------------
+    // Debounced, and only when the scroll is inside a table/grid: the point is
+    // to harvest the rows a virtualized table reveals as the operator scrolls,
+    // not to log every pixel of page scroll.
+    let scrollTimer = null;
+    let scrollTarget = null;
+    let scrollTrusted = false;
+    document.addEventListener("scroll", (ev) => {
+      const node = ev.target;
+      let table = null;
+      try {
+        table = node && node.closest
+          ? node.closest("table,[role=table],[role=grid],[role=treegrid]")
+          : null;
+        if (!table && node && node.querySelector) {
+          table = node.querySelector("table,[role=table],[role=grid],[role=treegrid]");
+        }
+      } catch (e) { table = null; }
+      if (!table) return;
+      scrollTarget = table;
+      // Captured now, because the event object is stale inside the debounce.
+      // A programmatic scroll (isTrusted === false) is NOT an employee action.
+      scrollTrusted = !!ev.isTrusted;
+      if (scrollTimer !== null) return;
+      scrollTimer = setTimeout(() => {
+        scrollTimer = null;
+        guard("user_scroll", () => {
+          if (!scrollTarget) return;
+          const ctx = tableContext(scrollTarget) || {};
+          ctx.visible_rows = visibleTableRows(scrollTarget, 60);
+          emit("user_scroll", { reason: "scroll", table: ctx, trusted: scrollTrusted });
+          scrollTarget = null;
+        });
+      }, 300);
     }, { capture: true, passive: true });
 
     // Records observed in the page's own world arrive here.
@@ -620,6 +944,11 @@
             action: form.action || null,
             method: (form.method || "GET").toUpperCase(),
             form: form.id || form.getAttribute("name") || null,
+            // The form's structural path, so a programmatically submitted
+            // ANONYMOUS form (no id/name) still merges with the entry its DOM
+            // inventory and inputs built, instead of being dropped for lack of
+            // identity.
+            form_path: domPath(form),
             stack: captureStack(0),
           });
           flush(true); // navigation is imminent

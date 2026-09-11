@@ -4,9 +4,15 @@ Each sensor turns one source of browser observation into spine events. Sensors
 emit facts; they never correlate, score or conclude. Analysis reads the recorded
 log instead, which is what keeps it testable without a browser.
 
-The existing network capture still lives in the investigator itself, because it
-also feeds the M1 exporters that remain the behavioural authority. These sensors
-cover what was previously unobserved.
+Network capture still lives in the investigator itself, because it also feeds
+the running tally the session manifest reports. These sensors cover what it
+does not see.
+
+`scope.py` holds the engagement boundary every sensor applies: out of scope
+means metadata only, on every observation path. It lives there rather than in
+one sensor because a boundary rule present in only one of them is a boundary
+rule with a hole in it -- which is exactly how the lifecycle sensor came to be
+emitting third-party frame URLs with their query strings intact.
 """
 
 from ..storage import BlobStore

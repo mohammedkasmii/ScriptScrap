@@ -13,6 +13,7 @@ Everything produced here is DERIVED KNOWLEDGE: an inference carrying the
 
 from .correlation import CorrelationAnalyzer, field_name_similarity, normalize_field_tokens
 from .endpoints import EndpointAnalyzer
+from .forms import FormCatalogAnalyzer, FormCatalogEntry, FormControl
 from .models import (
     ANALYSIS_VERSION,
     AnalysisResult,
@@ -31,13 +32,16 @@ from .models import (
 )
 from .pipeline import analyze_events, analyze_log
 from .schema import SchemaInferrer
-from .selectors import SelectorAnalyzer, generated_id_warning
+from .segmentation import ActivitySegment, SegmentationAnalyzer
+from .selectors import SelectorAnalyzer, generated_id_warning, semantic_key
 from .states import StateAnalyzer, route_shape
 from .store import DerivedStore
+from .tables import TableCatalogAnalyzer, TableCatalogEntry
 from .technology import TechnologyAnalyzer
 
 __all__ = [
     "ANALYSIS_VERSION",
+    "ActivitySegment",
     "AnalysisResult",
     "AppState",
     "CorrelationAnalyzer",
@@ -47,14 +51,20 @@ __all__ = [
     "EndpointAnalyzer",
     "Evidence",
     "Finding",
+    "FormCatalogAnalyzer",
+    "FormCatalogEntry",
+    "FormControl",
     "LocatorCandidate",
     "ParamObservation",
     "Schema",
     "SchemaField",
     "SchemaInferrer",
+    "SegmentationAnalyzer",
     "SelectorAnalyzer",
     "StateAnalyzer",
     "StateTransition",
+    "TableCatalogAnalyzer",
+    "TableCatalogEntry",
     "Technology",
     "TechnologyAnalyzer",
     "UIElement",
@@ -64,4 +74,5 @@ __all__ = [
     "generated_id_warning",
     "normalize_field_tokens",
     "route_shape",
+    "semantic_key",
 ]

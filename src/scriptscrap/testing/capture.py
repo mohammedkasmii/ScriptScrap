@@ -33,11 +33,13 @@ INVESTIGATOR_PATH = REPO_ROOT / "camoufox" / "camoufox_investigator.py"
 FIXED_SESSION_ID = "sess-20260101-000000"
 
 
-def load_investigator(output_dir: Path) -> ModuleType:
-    """Import the investigator and point its output at `output_dir`.
+def load_investigator(output_dir: Path | None = None) -> ModuleType:
+    """Import the investigator module.
 
-    OUTPUT_DIR is a module-level constant read by `WebHarvester.__init__`, so it
-    must be rebound before an engine is constructed.
+    Each `WebHarvester` now takes its `output_dir` directly, so the output
+    directory is passed at construction rather than rebound on the module. The
+    argument is accepted for backwards compatibility with older callers and is
+    otherwise unused.
     """
     spec = importlib.util.spec_from_file_location("camoufox_investigator", INVESTIGATOR_PATH)
     if spec is None or spec.loader is None:
@@ -45,7 +47,6 @@ def load_investigator(output_dir: Path) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     sys.modules["camoufox_investigator"] = module
     spec.loader.exec_module(module)
-    module.OUTPUT_DIR = output_dir
     return module
 
 
@@ -66,12 +67,13 @@ async def run_scripted_investigation(
 
     from scriptscrap.fixture import FixtureServer
 
-    inv = load_investigator(output_dir)
+    inv = load_investigator()
 
     with FixtureServer() as fixture:
         base = fixture.base_url
         scope = inv.InvestigationScope(base)
-        engine = inv.WebHarvester(base, scope, session_id=FIXED_SESSION_ID)
+        engine = inv.WebHarvester(base, scope, session_id=FIXED_SESSION_ID,
+                                  output_dir=output_dir)
 
         launch_options = {
             "headless": headless,
@@ -204,6 +206,10 @@ async def run_scripted_investigation(
             # -- 9. final in-page introspection ---------------------------
             await engine.extract_active_introspection(page)
 
+        # Reaching here means the scripted workflow finished. `stop_after_step`
+        # raises before this, so a simulated crash keeps the pessimistic
+        # default and never claims a clean outcome.
+        engine.outcome = "clean"
         engine.export()
         return inv
 

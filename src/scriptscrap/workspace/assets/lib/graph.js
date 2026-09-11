@@ -1,0 +1,189 @@
+// A layered directed graph, drawn as SVG.
+//
+// Hand-rolled rather than a library, because the workspace must work on a
+// disconnected machine and the CSP forbids loading one. At 33 endpoints and 25
+// states this is a small amount of code; if a session ever produces a graph
+// large enough to need a real layout engine, that is the point to reconsider.
+//
+// **State machines have cycles.** A login state reaches a secure state which
+// reaches logout which returns to login. A naive longest-path layering walks
+// that forever, so layering here is an explicit relaxation with a bounded
+// number of passes, and any edge that would point backwards is drawn as a
+// return edge instead of being allowed to move a node.
+
+// The composite-key separator. One definition, so the two call sites below
+// cannot drift apart.
+const SEP = '\u0000';
+
+const NODE_W = 190;
+const NODE_H = 44;
+const GAP_X = 90;
+const GAP_Y = 26;
+const PAD = 24;
+
+/**
+ * @param {{id: string, label: string, sub?: string, count?: number}[]} nodes
+ * @param {{from: string, to: string, label?: string}[]} edges
+ */
+export function layout(nodes, edges) {
+  const ids = nodes.map((n) => n.id);
+  const known = new Set(ids);
+  const real = edges.filter((e) => known.has(e.from) && known.has(e.to) && e.from !== e.to);
+
+  const layer = new Map(ids.map((id) => [id, 0]));
+  // Bounded relaxation. Each pass can only push a node right; with a cycle the
+  // passes stop before the cycle can push forever, and the edge that would
+  // have kept pushing is reported as a back edge below.
+  const passes = Math.min(ids.length, 64);
+  for (let pass = 0; pass < passes; pass += 1) {
+    let moved = false;
+    for (const edge of real) {
+      const want = layer.get(edge.from) + 1;
+      if (layer.get(edge.to) < want) {
+        layer.set(edge.to, want);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+
+  const columns = new Map();
+  for (const id of ids) {
+    const depth = layer.get(id);
+    if (!columns.has(depth)) columns.set(depth, []);
+    columns.get(depth).push(id);
+  }
+
+  const position = new Map();
+  for (const [depth, members] of [...columns.entries()].sort((a, b) => a[0] - b[0])) {
+    members.forEach((id, row) => {
+      position.set(id, {
+        x: PAD + depth * (NODE_W + GAP_X),
+        y: PAD + row * (NODE_H + GAP_Y),
+      });
+    });
+  }
+
+  const height = Math.max(...[...columns.values()].map((m) => m.length), 1);
+  return {
+    positions: position,
+    width: PAD * 2 + columns.size * NODE_W + Math.max(columns.size - 1, 0) * GAP_X,
+    height: PAD * 2 + height * NODE_H + Math.max(height - 1, 0) * GAP_Y,
+    backEdges: real.filter((e) => layer.get(e.to) <= layer.get(e.from)),
+  };
+}
+
+const SVG = 'http://www.w3.org/2000/svg';
+
+function svgEl(tag, attrs = {}) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v !== null && v !== undefined) node.setAttribute(k, String(v));
+  }
+  return node;
+}
+
+export function draw(nodes, edges, { onSelect } = {}) {
+  const { positions, width, height, backEdges } = layout(nodes, edges);
+  // U+0000 as the separator: a node id cannot contain it, so a composite
+  // key cannot collide. Written as an escape, not as a literal byte -- a raw
+  // NUL makes git treat this file as binary, so it has no diff and no blame,
+  // and one normalising editor would change the separator without showing one.
+  const backSet = new Set(backEdges.map((e) => `${e.from}${SEP}${e.to}`));
+
+  const svg = svgEl('svg', {
+    class: 'graph', width, height, viewBox: `0 0 ${width} ${height}`,
+    role: 'img', 'aria-label': 'Relationship graph',
+  });
+
+  const defs = svgEl('defs');
+  for (const [id, cls] of [['arrow', 'edge-head'], ['arrow-back', 'edge-head back']]) {
+    const marker = svgEl('marker', {
+      id, viewBox: '0 0 10 10', refX: 10, refY: 5,
+      markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse',
+    });
+    marker.append(svgEl('path', { d: 'M 0 0 L 10 5 L 0 10 z', class: cls }));
+    defs.append(marker);
+  }
+  svg.append(defs);
+
+  const edgeLayer = svgEl('g', { class: 'edges' });
+  for (const edge of edges) {
+    const from = positions.get(edge.from);
+    const to = positions.get(edge.to);
+    if (!from || !to) continue;
+    const isBack = backSet.has(`${edge.from}${SEP}${edge.to}`);
+    const x1 = from.x + NODE_W;
+    const y1 = from.y + NODE_H / 2;
+    const x2 = to.x;
+    const y2 = to.y + NODE_H / 2;
+    const mid = (x1 + x2) / 2;
+    const path = svgEl('path', {
+      class: `edge${isBack ? ' edge-back' : ''}`,
+      d: isBack
+        // A return edge loops under the row rather than crossing the columns
+        // backwards, so a cycle stays readable instead of looking like noise.
+        ? `M ${x1} ${y1} C ${x1 + 40} ${y1 + 60}, ${x2 - 40} ${y2 + 60}, ${x2} ${y2}`
+        : `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`,
+      'marker-end': isBack ? 'url(#arrow-back)' : 'url(#arrow)',
+    });
+    path.append(svgEl('title')).textContent = edge.label || `${edge.from} → ${edge.to}`;
+    edgeLayer.append(path);
+    if (edge.label) {
+      const text = svgEl('text', {
+        class: 'edge-label', x: mid, y: (y1 + y2) / 2 - 6, 'text-anchor': 'middle',
+      });
+      text.textContent = edge.label;
+      edgeLayer.append(text);
+    }
+  }
+  svg.append(edgeLayer);
+
+  const nodeLayer = svgEl('g', { class: 'nodes' });
+  for (const node of nodes) {
+    const at = positions.get(node.id);
+    if (!at) continue;
+    const group = svgEl('g', {
+      class: 'node', transform: `translate(${at.x},${at.y})`,
+      tabindex: '0', role: 'button',
+    });
+    group.append(svgEl('rect', { width: NODE_W, height: NODE_H, rx: 6, class: 'node-box' }));
+
+    const label = svgEl('text', { class: 'node-label', x: 10, y: 19 });
+    label.textContent = truncate(node.label, 26);
+    group.append(label);
+
+    if (node.sub) {
+      const sub = svgEl('text', { class: 'node-sub', x: 10, y: 34 });
+      sub.textContent = truncate(node.sub, 30);
+      group.append(sub);
+    }
+    if (node.count !== undefined && node.count !== null) {
+      const count = svgEl('text', {
+        class: 'node-count', x: NODE_W - 10, y: 19, 'text-anchor': 'end',
+      });
+      count.textContent = String(node.count);
+      group.append(count);
+    }
+
+    const title = svgEl('title');
+    title.textContent = node.label + (node.sub ? `\n${node.sub}` : '');
+    group.append(title);
+
+    if (onSelect) {
+      group.classList.add('selectable');
+      group.addEventListener('click', () => onSelect(node));
+      group.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(node); }
+      });
+    }
+    nodeLayer.append(group);
+  }
+  svg.append(nodeLayer);
+  return { svg, backEdges };
+}
+
+function truncate(text, max) {
+  const value = String(text ?? '');
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}

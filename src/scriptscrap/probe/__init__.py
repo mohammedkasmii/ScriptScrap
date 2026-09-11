@@ -35,6 +35,34 @@ def build_init_script(config: dict[str, Any] | None = None) -> str:
     return prelude + probe_source()
 
 
+INSTALL_FLAG = "__scriptscrapProbeInstalled"
+
+
+def build_isolated_reinstall_script(config: dict[str, Any] | None = None) -> str:
+    """The isolated probe, forced to install NOW in the current document.
+
+    Camoufox's context-level init script defines the probe's globals in a
+    popup's isolated world but its DOM listeners do not take effect there --
+    verified empirically: a popup's fill fires a manually-added isolated
+    listener but never the probe's own. Re-evaluating the probe into the live
+    document DOES attach working listeners. The install flag is cleared first so
+    the guard at the top of the probe does not short-circuit, and this is
+    evaluated per main-frame navigation of a non-initial page: each navigation
+    is a fresh document, so exactly one probe attaches per document -- no
+    duplicate observers accumulate.
+    """
+    # The counter is a deterministic signal that the re-arm actually executed
+    # in this document -- distinct from the install flag, which the context init
+    # script also sets. A caller (or a test) can wait for it to know the working
+    # listeners are attached before driving the page.
+    prelude = (
+        f"try {{ delete window.{INSTALL_FLAG}; "
+        f"window.__scriptscrapRearmCount = (window.__scriptscrapRearmCount || 0) + 1; "
+        f"}} catch (e) {{}}\n"
+    )
+    return prelude + build_init_script(config)
+
+
 def build_main_world_script(config: dict[str, Any] | None = None) -> str:
     """The same probe in its `main` role, as a single EXPRESSION.
 
@@ -53,5 +81,6 @@ def build_main_world_script(config: dict[str, Any] | None = None) -> str:
     )
 
 
-__all__ = ["BINDING_NAME", "DRAIN_FUNCTION", "PATCH_MARKER",
-           "build_init_script", "build_main_world_script", "probe_source"]
+__all__ = ["BINDING_NAME", "DRAIN_FUNCTION", "INSTALL_FLAG", "PATCH_MARKER",
+           "build_init_script", "build_isolated_reinstall_script",
+           "build_main_world_script", "probe_source"]

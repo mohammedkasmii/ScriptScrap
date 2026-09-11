@@ -3,16 +3,20 @@
 Scope of the baseline: **every post-M0 output the investigator produces**, at a
 granularity that makes a real behavioural change produce a readable diff.
 
-Two files are summarised rather than embedded verbatim, for reasons that are
-about signal, not convenience:
+Two artifacts are summarised rather than embedded verbatim, for reasons that
+are about signal, not convenience:
 
 * `visual_traces/*.html` -- tens of KB of application markup per snapshot. The
   offline snapshot's *fidelity properties* are what matter and are asserted
   structurally; its full text is already covered by the F-03 probe.
-* `events.jsonl` -- the spine is dual-write and not yet authoritative, so the
-  baseline pins the emission *shape* (which event types, in which order, from
-  which source) rather than payloads that will legitimately churn as sensors
-  are added in M2.
+* `events.jsonl` -- the baseline pins the emission *shape* (which event types,
+  in which order, from which source) rather than payloads that legitimately
+  churn as sensors are added.
+
+Since the legacy output was retired, `events.jsonl` and `session_manifest.json`
+are the only files the investigator writes that this compares. That is not a
+narrower baseline: the nine retired files were views of the same observations,
+and the spine records those observations directly.
 """
 
 from __future__ import annotations
@@ -21,17 +25,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .normalize import normalize, sort_network_log
+from .normalize import normalize
 
 # Files compared field-by-field after normalisation.
+#
+# This was nine files until the legacy output was retired. Everything those
+# files asserted is now derived by `scriptscrap analyze` from the event log,
+# which is itself pinned below by `_summarise_events` -- so the evidence is
+# still compared, one layer lower down and with its event ids attached.
 FULL_COMPARE_FILES = (
-    "api_dependencies.json",
-    "dom_structure.json",
-    "dropdown_catalogs.json",
-    "jquery_events.json",
-    "js_hooks_and_mutations.json",
-    "mcma_openapi_spec.json",
-    "out_of_scope_metadata.json",
     "session_manifest.json",
 )
 
@@ -60,29 +62,6 @@ def _summarise_html_snapshot(path: Path) -> dict[str, Any]:
         "contains_shadow_host": 'id="shadow-host"' in html,
     }
 
-
-def _summarise_generated_client(path: Path) -> dict[str, Any]:
-    """The client's security posture and its shape, not its formatting."""
-    code = path.read_text(encoding="utf-8")
-    functions = sorted(
-        line.split("(")[0].removeprefix("async def ").strip()
-        for line in code.splitlines()
-        if line.startswith("async def ")
-    )
-    return {
-        "functions": functions,
-        "reads_credentials_from_env": "SCRIPTSCRAP_AUTH_HEADERS" in code,
-        "enforces_tls_verification": "verify=False" not in code and "_verify()" in code,
-        "documents_credential_header_names": "credential-bearing headers" in code,
-        # Values the fixture plants specifically so a leak has something to trip on.
-        "embeds_no_password": "fixture-password-not-a-real-secret" not in code,
-        "embeds_no_csrf_value": "FIXTURE-CSRF-TOKEN-0001" not in code,
-        "embeds_no_session_cookie": "FIXTURE-SESSION-0001" not in code,
-        "embeds_no_operator_pii": "Alice Benali" not in code,
-        "embeds_no_captured_query_values": "?" not in code.split('url = "')[-1].split('"')[0]
-        if 'url = "' in code
-        else True,
-    }
 
 
 # Event types whose relative ORDER is genuinely nondeterministic: a page with
@@ -162,14 +141,6 @@ def build_snapshot(output_dir: Path) -> dict[str, Any]:
     for name in FULL_COMPARE_FILES:
         path = output_dir / name
         snapshot[name] = normalize(_load_json(path)) if path.exists() else None
-
-    network_path = output_dir / "network_traffic.json"
-    if network_path.exists():
-        snapshot["network_traffic.json"] = normalize(sort_network_log(_load_json(network_path)))
-
-    client_path = output_dir / "generated_client.py"
-    if client_path.exists():
-        snapshot["generated_client.py"] = _summarise_generated_client(client_path)
 
     events_path = output_dir / "events.jsonl"
     if events_path.exists():

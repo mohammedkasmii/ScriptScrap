@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -33,6 +34,11 @@ def _resolve_log(session: Path) -> Path:
     raise SystemExit(f"no events.jsonl found at {session}")
 
 
+# Finding kinds that mean the LOG cannot be indexed, as opposed to conclusions
+# drawn from it being weak.
+_INTEGRITY_KINDS = frozenset({"duplicate_event_id"})
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     session = Path(args.session)
     log = _resolve_log(session)
@@ -44,7 +50,31 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if args.rebuild and db_path.exists():
         db_path.unlink()
     with DerivedStore(db_path) as store:
-        run_id = store.write(result)
+        if store.rebuilt:
+            # Never silent. A store that vanished without a line of output
+            # would look like data loss.
+            print(f"rebuilt {db_path}: it was written by an earlier store schema")
+        try:
+            run_id = store.write(result)
+        except sqlite3.IntegrityError as exc:
+            # The LOG is the defect, not the tool. An IntegrityError traceback
+            # names a SQLite index and reads like ScriptScrap failed; the
+            # finding says which id repeats and why that makes citations
+            # meaningless.
+            blocking = [f for f in result.findings
+                        if f.severity == "critical" and f.kind in _INTEGRITY_KINDS]
+            if not blocking:
+                raise
+            raise SystemExit(
+                "refusing to index this log:\n  "
+                + "\n  ".join(f.message for f in blocking)
+                + f"\n\n({exc})") from None
+        if store.replaced:
+            print(f"  replaced {store.replaced} superseded run(s)")
+            # VACUUM reclaims the freed pages; without it the file keeps them
+            # and the size never comes back down. It cannot run inside a
+            # transaction, which is why it is here and not in _prune.
+            store.conn.execute("VACUUM")
 
     analysis_dir = root / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -65,24 +95,48 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
+    from .export import Redactor, sanitise
+
     session = Path(args.session)
     log = _resolve_log(session)
     root = log.parent
 
     result = analyze_log(log)
-    exporter = DatasetExporter()
-    target = root / "export" / "shared"
-    dataset_path = exporter.write(result, target)
-    (target / "report.md").write_text(render(result), encoding="utf-8")
+    redactor = Redactor()
+    # ONE sanitisation boundary. Every artifact below is a view of `safe`; a
+    # second one would be a second thing to get wrong. The previous version
+    # rendered report.md straight from the unredacted result.
+    safe = sanitise(result, redactor)
 
-    stats = exporter.redactor.stats()
+    exporter = DatasetExporter(redactor=redactor)
+    target = root / "export" / "shared"
+    target.mkdir(parents=True, exist_ok=True)
+    dataset_path = target / "dataset.json"
+    dataset_path.write_text(
+        json.dumps(exporter.build_from_sanitised(safe), indent=2,
+                   ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8")
+    (target / "report.md").write_text(render(safe), encoding="utf-8")
+
+    # The sanitised twin's derived store, written by the SAME writer from the
+    # SAME sanitised model. A second store writer, or a second read path in the
+    # workspace, would be a second thing to keep correct.
+    store_path = target / "session.sqlite"
+    if store_path.exists():
+        store_path.unlink()
+    with DerivedStore(store_path) as store:
+        store.write(safe)
+
+    stats = redactor.stats()
     print(f"shareable dataset  {dataset_path}")
     print(f"report             {target / 'report.md'}")
+    print(f"derived store      {store_path}")
     print(f"credentials removed  {stats['credentials_removed']}")
     print(f"values pseudonymised {stats['values_pseudonymised']} "
           f"({stats['distinct_pseudonyms']} distinct)")
-    print("\nRaw bodies, screenshots and HTML snapshots are NOT exported; they "
-          "remain in the local session directory.")
+    print("\nEvery value was classified before export. Element labels and text "
+          "are not exported at all; raw bodies, screenshots, HTML snapshots "
+          "and the evidence index remain in the local session directory.")
     return 0
 
 
@@ -110,6 +164,105 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 0
 
 
+GENERATORS = {
+    "client": ("generated_client.py", "an httpx client"),
+    "playwright": ("observed_workflow.py", "a Playwright starting point"),
+}
+
+
+def _render_for(kind: str):
+    """The renderer for one generator kind. A seam, so a test can fail it."""
+    from .generate import render_client, render_playwright
+
+    return render_client if kind == "client" else render_playwright
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    """Turn the derived model into a runnable starting point."""
+    from .generate import GeneratedSourceError
+
+    sanitised = getattr(args, "sanitised", False)
+    if sanitised and args.kind != "playwright":
+        # Accepting it would imply the client had something to sanitise. It
+        # does not: it carries routes and names, and no observed value.
+        raise SystemExit("--sanitised applies to the playwright generator only")
+
+    session = Path(args.session)
+    log = _resolve_log(session)
+    root = log.parent
+    result = analyze_log(log)
+
+    filename, description = GENERATORS[args.kind]
+    extra = {"sanitised": True} if sanitised else {}
+    try:
+        source = _render_for(args.kind)(result, session_name=root.name, **extra)
+    except GeneratedSourceError as exc:
+        # Nothing is written. A file that does not compile is worse than no
+        # file: the reader discovers it three steps into a debugging session.
+        raise SystemExit(str(exc)) from None
+
+    target = Path(args.output) if args.output else root / filename
+    target.write_text(source, encoding="utf-8")
+
+    print(f"wrote {description}  {target}")
+    print(f"  derived from {result.event_count} events, "
+          f"{len(result.endpoints)} endpoint(s), {len(result.states)} state(s)")
+    if result.auth_headers:
+        print(f"  this API authenticated with: {', '.join(sorted(result.auth_headers))}")
+        if args.kind == "client":
+            print("  supply them via SCRIPTSCRAP_AUTH_HEADERS; no value was captured")
+        else:
+            print("  implement the login steps or load Playwright storage state; "
+                  "no credential value was captured")
+    print("\nThis describes ONE observed session. Routes nobody visited are "
+          "not in it.")
+    if args.kind == "playwright" and not sanitised:
+        # Said at the point of exposure, not only in a file nobody opens --
+        # the same posture cmd_workspace takes about serving a raw capture.
+        print("\n  !  UNREDACTED: this script's locators, labels and element "
+              "text come")
+        print("     from the captured application and may contain sensitive "
+              "data.")
+        print("     Read it before you commit it. For a shareable variant:")
+        print(f"       scriptscrap generate playwright {args.session} --sanitised")
+    return 0
+
+
+def cmd_workspace(args: argparse.Namespace) -> int:
+    """Serve a browsable, read-only view of one or more sessions."""
+    from .workspace import SessionError, Workspace, WorkspaceConfig
+
+    root = Path(args.session)
+    try:
+        workspace = Workspace(WorkspaceConfig(root=root, port=args.port))
+    except SessionError as exc:
+        raise SystemExit(str(exc)) from None
+
+    unredacted = [s for s in workspace.sessions if s.redaction == "unredacted"]
+    print(f"serving  {workspace.url}")
+    print(f"         loopback only ({workspace.address[0]})\n")
+    for handle in workspace.sessions:
+        print(f"  {handle.name}  [{handle.redaction.upper()}]")
+    if unredacted:
+        # Said at the point of exposure, not only in a file nobody opens.
+        print("\n  ⚠  This serves an unredacted capture of an authenticated session:")
+        print("     live credentials, full bodies, screenshots. The page says so in")
+        print("     its header. Do not screen-share without checking that.")
+    print("\nCtrl+C to stop.")
+
+    if not args.no_open:
+        import webbrowser
+        webbrowser.open(workspace.url)
+
+    try:
+        workspace.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped.")
+    finally:
+        workspace.shutdown()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scriptscrap",
@@ -134,6 +287,31 @@ def build_parser() -> argparse.ArgumentParser:
     health = sub.add_parser("health", help="print the capture-health assessment")
     health.add_argument("session", help="session directory or events.jsonl path")
     health.set_defaults(func=cmd_health)
+
+    workspace = sub.add_parser(
+        "workspace", help="browse an analysed session in a local read-only viewer")
+    workspace.add_argument(
+        "session", help="a session directory, or a directory holding several")
+    workspace.add_argument("--port", type=int, default=0,
+                           help="port to listen on (default: an ephemeral one)")
+    workspace.add_argument("--no-open", action="store_true",
+                           help="do not open a browser")
+    workspace.set_defaults(func=cmd_workspace)
+
+    generate = sub.add_parser(
+        "generate", help="derive a runnable starting point from an analysed session")
+    generate.add_argument("kind", choices=sorted(GENERATORS),
+                          help="client: an httpx client, carries no captured "
+                               "value. playwright: a browser script -- "
+                               "UNREDACTED, its locators come from the "
+                               "application and may contain sensitive data.")
+    generate.add_argument("session", help="session directory or events.jsonl path")
+    generate.add_argument("-o", "--output", help="write here instead of the session directory")
+    generate.add_argument("--sanitised", action="store_true",
+                          help="playwright only: a shareable variant. Locators "
+                               "that carried application text are removed and "
+                               "marked, and the script refuses to run.")
+    generate.set_defaults(func=cmd_generate)
 
     return parser
 

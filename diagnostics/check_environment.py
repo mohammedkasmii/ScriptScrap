@@ -171,18 +171,38 @@ def check_gitignore() -> None:
                f"{len(samples)}/{len(samples)} sample output paths ignored")
 
 
-def check_generated_client_policy() -> None:
-    """No captured credentials, and no disabled TLS verification."""
+def check_credential_classification() -> None:
+    """The capture must record credential headers by NAME, never by value."""
     if not INVESTIGATOR.exists():
-        record(FAIL, "generated client policy", f"missing: {INVESTIGATOR}")
+        record(FAIL, "credential classification", f"missing: {INVESTIGATOR}")
         return
     source = INVESTIGATOR.read_text(encoding="utf-8")
+    if "is_sensitive_header" in source and "credential_header_names" in source:
+        record(PASS, "credential classification",
+               "credential-bearing headers recorded by name only")
+    else:
+        record(FAIL, "credential classification",
+               "no credential-header filtering at capture time")
+
+
+def check_generated_client_policy() -> None:
+    """No captured credentials, and no disabled TLS verification.
+
+    This used to audit the investigator, which emitted `generated_client.py`
+    directly. That writer was retired; the generator now lives in its own
+    module, so the check follows it there rather than looking for its remains
+    in a file that no longer has the job.
+    """
+    generator = REPO / "src" / "scriptscrap" / "generate" / "client.py"
+    if not generator.exists():
+        record(PASS, "generated client policy",
+               "no client generator present; nothing generates credentials to leak")
+        return
+    source = generator.read_text(encoding="utf-8")
 
     problems = []
     if "verify=False" in source:
         problems.append("emits verify=False (TLS verification disabled)")
-    if "is_sensitive_header" not in source:
-        problems.append("no credential-header filtering")
     if "SCRIPTSCRAP_AUTH_HEADERS" not in source:
         problems.append("does not source credentials from the environment")
 
@@ -190,7 +210,7 @@ def check_generated_client_policy() -> None:
         record(FAIL, "generated client policy", "; ".join(problems))
     else:
         record(PASS, "generated client policy",
-               "credentials excluded from source, TLS verification enforced")
+               "credentials excluded from generated source, TLS verification enforced")
 
 
 def check_scope_policy() -> None:
@@ -268,6 +288,7 @@ def main() -> int:
     check_default_addons()
     check_addon_cache()
     check_gitignore()
+    check_credential_classification()
     check_generated_client_policy()
     check_scope_policy()
     check_websocket_subscription()

@@ -17,7 +17,11 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "scriptscrap"
 FORBIDDEN_ROOTS = {"playwright", "camoufox"}
 FORBIDDEN_INTERNAL = {"sensors", "probe", "fixture"}
 
-PURE_PACKAGES = ("analysis", "export")
+# The workspace joined this list when it was built: it reads a recorded
+# session and never produces one, so it belongs on the same side of the
+# line as analysis. A convenience import of a sensor would make the
+# workspace un-runnable on a machine that only has the captured data.
+PURE_PACKAGES = ("analysis", "export", "workspace")
 
 
 def _imports(path: Path) -> set[str]:

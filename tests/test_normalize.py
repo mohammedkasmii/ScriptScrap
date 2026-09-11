@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scriptscrap.testing import normalize, normalize_text, sort_network_log
+from scriptscrap.testing import normalize, normalize_text
 
 
 def test_removes_timestamps():
@@ -69,18 +69,6 @@ def test_behaviour_is_never_normalised_away():
 def test_normalisation_is_recursive():
     nested = {"a": [{"b": {"t": "2026-01-01T00:00:00Z"}}]}
     assert normalize(nested) == {"a": [{"b": {"t": "<TS>"}}]}
-
-
-def test_network_log_ordering_is_stable_but_lossless():
-    entries = [
-        {"method": "POST", "url": "http://h/b", "body": {"x": 1}},
-        {"method": "GET", "url": "http://h/a", "body": None},
-        {"method": "GET", "url": "http://h/c", "body": None},
-    ]
-    ordered = sort_network_log(entries)
-    assert [e["url"] for e in ordered] == ["http://h/a", "http://h/c", "http://h/b"]
-    assert len(ordered) == len(entries)
-    assert sort_network_log(list(reversed(entries))) == ordered
 
 
 def test_two_runs_of_identical_behaviour_normalise_equal():

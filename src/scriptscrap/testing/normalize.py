@@ -57,6 +57,12 @@ PINNED_ENV_KEYS = frozenset(
 # Keys carrying a monotonic clock reading. Ordering is asserted separately.
 MONOTONIC_KEYS = frozenset({"t_mono"})
 
+# Wall-clock elapsed durations: real numbers that differ between two runs of
+# identical behaviour, so they are normalised by name like the timestamps are.
+# What is under test is that the manifest CARRIES a duration, not its value.
+DURATION_KEYS = frozenset(
+    {"duration_seconds", "elapsed_seconds", "last_checkpoint"})
+
 # Transport metrics, not behaviour. `batches` counts how many IPC round trips
 # the runtime probe used to deliver its events; the same events can arrive in a
 # different number of batches depending on how the flush timer lands. The event
@@ -91,6 +97,8 @@ def normalize(value: Any, *, key: str | None = None) -> Any:
         return PLACEHOLDER_PINNED
     if key in MONOTONIC_KEYS:
         return PLACEHOLDER_MONO
+    if key in DURATION_KEYS:
+        return PLACEHOLDER_TS
     if key in TRANSPORT_KEYS:
         return PLACEHOLDER_TRANSPORT
     if isinstance(value, str):
@@ -100,27 +108,3 @@ def normalize(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, list):
         return [normalize(v) for v in value]
     return value
-
-
-def sort_network_log(entries: list[dict]) -> list[dict]:
-    """Order network entries deterministically.
-
-    Response completion order genuinely varies between runs for concurrent
-    requests, so comparing raw arrival order would produce flaky failures that
-    teach developers to re-bless the baseline without reading it. Sorting by
-    (method, url, body) keeps every entry and every field under test while
-    removing only the ordering.
-
-    Ordering is not lost from the system: the event spine's `seq` is the
-    authoritative order and is checked by its own tests.
-    """
-    import json as _json
-
-    return sorted(
-        entries,
-        key=lambda e: (
-            str(e.get("method", "")),
-            str(e.get("url", "")),
-            _json.dumps(e.get("body"), sort_keys=True, default=str),
-        ),
-    )

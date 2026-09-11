@@ -20,10 +20,12 @@ from urllib.parse import urlparse
 from ..events import Event, EventType
 from .identifiers import identifier_kind
 from .models import AppState, Evidence, StateTransition
+from .selectors import semantic_key
 
 # Events that can plausibly cause a state change.
 TRIGGER_TYPES = (
     EventType.USER_SUBMIT, EventType.USER_CLICK,
+    EventType.USER_DBLCLICK, EventType.USER_RIGHTCLICK,
     EventType.RUNTIME_HISTORY, EventType.RUNTIME_FORM_SUBMIT,
 )
 
@@ -167,13 +169,14 @@ class StateAnalyzer:
         proven cause.
         """
         triggers = [e for e in events if e.type in TRIGGER_TYPES]
-        merged: dict[tuple[str, str, str], StateTransition] = {}
+        merged: dict[tuple[str, str, str, str | None], StateTransition] = {}
 
         for previous, current in zip(timeline, timeline[1:], strict=False):
             if previous["fingerprint"] == current["fingerprint"]:
                 continue
             candidate, method = self._candidate_trigger(previous, current, triggers)
             trigger = "unknown"
+            trigger_type = trigger_element_key = trigger_event_id = None
             evidence = Evidence()
             evidence.cite(previous["event_id"], current["event_id"])
             if candidate is not None:
@@ -181,6 +184,14 @@ class StateAnalyzer:
                 element = candidate.payload.get("element") or {}
                 target = element.get("id") or element.get("label") or element.get("text") or ""
                 trigger = f"{candidate.type}{f' #{target}' if target else ''}"
+                # The machine-readable halves. `trigger` above is a label and
+                # is NOT an identity: a generator that joined on it matched
+                # nothing, on 47 of 47 transitions in a real capture.
+                trigger_event_id = candidate.event_id
+                trigger_type = str(candidate.type)
+                trigger_element_key = (
+                    semantic_key(element)
+                    if isinstance(element, dict) and element.get("tag") else None)
                 evidence.cite(candidate.event_id)
                 evidence.add("trigger_type", str(candidate.type))
                 evidence.add(
@@ -191,12 +202,17 @@ class StateAnalyzer:
             else:
                 evidence.add("attribution", "no candidate trigger observed between states")
 
-            key = (previous["fingerprint"], current["fingerprint"], trigger)
+            key = (previous["fingerprint"], current["fingerprint"], trigger,
+                   trigger_element_key)
             existing = merged.get(key)
             if existing is None:
                 merged[key] = StateTransition(
                     from_state=previous["fingerprint"], to_state=current["fingerprint"],
-                    trigger=trigger, observation_count=1, evidence=evidence,
+                    trigger=trigger, observation_count=1,
+                    trigger_type=trigger_type,
+                    trigger_element_key=trigger_element_key,
+                    trigger_event_id=trigger_event_id,
+                    evidence=evidence,
                 )
             else:
                 existing.observation_count += 1

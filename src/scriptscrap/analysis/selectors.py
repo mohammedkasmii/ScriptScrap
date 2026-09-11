@@ -22,7 +22,8 @@ from ..events import Event, EventType
 from .models import Evidence, LocatorCandidate, UIElement
 
 USER_ACTION_TYPES = (
-    EventType.USER_CLICK, EventType.USER_INPUT,
+    EventType.USER_CLICK, EventType.USER_DBLCLICK, EventType.USER_RIGHTCLICK,
+    EventType.USER_INPUT,
     EventType.USER_CHANGE, EventType.USER_SUBMIT, EventType.USER_KEY,
 )
 
@@ -47,12 +48,37 @@ def generated_id_warning(value: str | None) -> str | None:
     return None
 
 
-def _semantic_key(element: dict[str, Any]) -> str:
+def _testid_of(element: dict[str, Any]) -> str | None:
+    """The most stable hook a page offers: a test id, in any common spelling.
+
+    `data-testid` -> `dataset.testid`, `data-test-id` -> `dataset.testId`,
+    `data-test` -> `dataset.test`, `data-cy` -> `dataset.cy`. The probe records
+    `el.dataset` verbatim, so the camelCased key is what arrives.
+    """
+    dataset = element.get("dataset")
+    if not isinstance(dataset, dict):
+        return None
+    for key in ("testid", "testId", "test", "cy"):
+        value = dataset.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def semantic_key(element: dict[str, Any]) -> str:
     """Group observations that are plausibly the same logical element.
 
     Built only from signals a re-render is unlikely to change. Notably it does
     NOT include the id: if it did, an element whose id regenerates would look
     like two different elements and its instability would be invisible.
+
+    A test id and a placeholder ARE part of it: two search boxes with different
+    placeholders are two controls, and merging them hid that. And when an
+    element carries none of those distinguishing signals -- a blank, nameless
+    input -- its structural position is the only thing left to tell it apart
+    from a sibling, so it is the fallback. Over-splitting an anonymous element
+    is the safe direction; merging two unrelated ones is the failure the
+    mission names.
     """
     parts = [
         element.get("tag") or "",
@@ -62,7 +88,21 @@ def _semantic_key(element: dict[str, Any]) -> str:
         element.get("name") or "",
         element.get("type") or "",
         element.get("form") or "",
+        (element.get("placeholder") or "").strip()[:60],
+        _testid_of(element) or "",
     ]
+    # An element with a name of its own -- role, label, text, name, placeholder
+    # or test id -- is identified by that. `type` and `form` are shared by every
+    # field of a form, so they do NOT make an element non-anonymous; a blank,
+    # nameless input has only its structural position to separate it from the
+    # field beside it, and without it two unrelated ones merge.
+    identifying = any([
+        element.get("role"), (element.get("label") or "").strip(),
+        (element.get("text") or "").strip(), element.get("name"),
+        (element.get("placeholder") or "").strip(), _testid_of(element),
+    ])
+    if not identifying:
+        parts.append((element.get("dom_path") or "").strip())
     return "|".join(parts)
 
 
@@ -77,7 +117,7 @@ class SelectorAnalyzer:
             element = event.payload.get("element")
             if not isinstance(element, dict) or not element.get("tag"):
                 continue
-            groups[_semantic_key(element)].append(event)
+            groups[semantic_key(element)].append(event)
 
         results = [self._build(key, group) for key, group in groups.items()]
         results.sort(key=lambda e: (-e.observation_count, e.key))
@@ -95,6 +135,10 @@ class SelectorAnalyzer:
             evidence.cite(event.event_id)
             actions[str(event.type)] += 1
 
+            # A test id is the most stable hook a page offers, so it leads.
+            testid = _testid_of(element)
+            if testid:
+                seen["test_id"][testid] += 1
             role, name = element.get("role"), element.get("label") or element.get("text")
             if role and name:
                 seen["role_name"][f'role={role} name="{name}"'] += 1
@@ -102,6 +146,8 @@ class SelectorAnalyzer:
                 seen["role_name"][f'role={element["tag"]} name="{name}"'] += 1
             if element.get("label"):
                 seen["label"][str(element["label"])] += 1
+            if element.get("placeholder"):
+                seen["placeholder"][str(element["placeholder"])] += 1
             if element.get("name"):
                 seen["name"][f'[name="{element["name"]}"]'] += 1
             if element.get("id"):
@@ -120,11 +166,17 @@ class SelectorAnalyzer:
             # The best single value for this strategy, and how often it held.
             value, count = max(values.items(), key=lambda kv: kv[1])
             warning = generated_id_warning(value) if strategy in ("id", "css", "structural") else None
+            # The prose warning interpolates a framework name or a count, so it
+            # cannot be exported. The code beside it is a fixed constant and is
+            # what a shareable dataset carries instead.
+            warning_code = "framework_generated" if warning else None
             if len(values) > 1 and warning is None:
                 warning = f"value changed across observations ({len(values)} distinct)"
+                warning_code = "value_varied"
             locators.append(LocatorCandidate(
                 strategy=strategy, value=value,
                 resolved_count=count, sample_count=total, warning=warning,
+                warning_code=warning_code,
             ))
         locators.sort(key=lambda locator: (-locator.stability, locator.strategy))
 

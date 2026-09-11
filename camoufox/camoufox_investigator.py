@@ -3,24 +3,29 @@ import contextlib
 import hashlib
 import json
 import platform
-import re
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote_plus, urlparse
+from urllib.parse import urlparse
 
 from camoufox.addons import DefaultAddons
 from camoufox.async_api import AsyncCamoufox
 
 # ---------------------------------------------------------------------------
-# Event spine (dual-write).
+# Event spine.
 #
-# The structures in WebHarvester remain the behavioural authority. Events are
-# emitted ALONGSIDE them so the model can be proven against real sessions before
-# anything depends on it. The import is defensive: this script must keep working
+# events.jsonl is the only record a session produces. It was dual-written
+# alongside nine legacy JSON outputs while the model was proven against real
+# sessions; those were retired once `scriptscrap analyze` derived everything
+# they stated, with the event ids behind each conclusion attached. The
+# structures in WebHarvester are now the investigator's own running tally --
+# they feed the manifest, not a second output contract.
+#
+# The import is defensive: this script must keep working
 # when run directly from a bare venv that has camoufox but not the scriptscrap
 # package installed. The supported path is `uv run`.
 # ---------------------------------------------------------------------------
@@ -39,7 +44,20 @@ except ImportError:  # pragma: no cover - exercised only in a bare venv
     FORENSIC = None
     EVENTS_AVAILABLE = False
 
-OUTPUT_DIR = Path("v13_investigation_output")
+# Where a session writes, when nothing else is chosen. Each investigation gets
+# its OWN directory: a fixed global path let two sessions append to one
+# events.jsonl, which mixed two sessions' evidence into one unreadable log. The
+# default is timestamped to microseconds so two captures started in the same
+# second still land in separate directories.
+DEFAULT_OUTPUT_ROOT = Path("scriptscrap_output")
+
+
+class OutputInUse(RuntimeError):
+    """The chosen output directory already holds another session's log."""
+
+
+def default_output_dir() -> Path:
+    return DEFAULT_OUTPUT_ROOT / datetime.now(UTC).strftime("session-%Y%m%d-%H%M%S-%f")
 
 NOISY_ENDPOINTS = {
     "iadvize.com", "usejimo.com", "iconify.design", "privacy-center.org",
@@ -61,19 +79,20 @@ It can contain:
 - `Authorization` / `Cookie` / CSRF headers for a live session
 - full request and response bodies, including personal and business data
 - full-page HTML snapshots and screenshots of authenticated pages
-- an auto-generated API client
+- `events.jsonl`, the append-only record of everything above
 
 ## Rules
 
 1. **Do not commit it.** The repository `.gitignore` covers `*_output/` by
    pattern. Verify with `git check-ignore -v <path>` before any commit.
-2. **Do not share it** outside the authorized engagement. A redaction pipeline
-   that produces a shareable dataset is planned but does not exist yet.
-3. `generated_client.py` contains **no** captured credentials. It reads them
-   from `SCRIPTSCRAP_AUTH_HEADERS` / `SCRIPTSCRAP_COOKIE` at runtime.
-4. Read `session_manifest.json` first. It records the browser build, the addon
+2. **Do not share it** outside the authorized engagement. Use
+   `scriptscrap export`, which writes a sanitised dataset to `export/shared/`:
+   credentials removed, identifiers pseudonymised, no bodies or screenshots.
+3. Read `session_manifest.json` first. It records the browser build, the addon
    configuration, the scope policy and the known blind spots that produced this
    evidence.
+4. `scriptscrap workspace` serves this directory over loopback only, and says
+   UNREDACTED in its header. Do not screen-share it without checking that.
 
 Deletion is a deliberate operator decision. Nothing here is auto-deleted.
 """
@@ -81,9 +100,10 @@ Deletion is a deliberate operator decision. Nothing here is auto-deleted.
 # ============================================================
 # CREDENTIAL CLASSIFICATION
 # ============================================================
-# Header names whose VALUES authenticate the operator's live session. These are
-# never written into generated source. The generated client asks for them from
-# the environment at runtime instead.
+# Header names whose VALUES authenticate the operator's live session. The
+# capture records that such a header was PRESENT, by name, and never its value.
+# Phase 3's generator reads the same classification so a generated client asks
+# for them from the environment instead of carrying a captured session.
 SENSITIVE_HEADERS = {
     "authorization", "proxy-authorization", "www-authenticate", "authentication",
     "cookie", "set-cookie", "cookie2",
@@ -156,28 +176,6 @@ class InvestigationScope:
                 "query strings", "screenshots", "HTML snapshots", "DOM structure",
             ],
         }
-
-
-def _split_captured_url(url: str) -> tuple[str, list[str], list[str]]:
-    """Split a captured URL into an endpoint and its parameter NAMES.
-
-    Query-string values are discarded, never emitted into generated source. A
-    GET form submission puts every field in the query string, so a captured URL
-    routinely carries passwords, CSRF tokens and personal data.
-
-    Returns (endpoint_url_without_query, all_param_names, credential_param_names).
-    """
-    parsed = urlparse(url)
-    endpoint = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    names: list[str] = []
-    for pair in parsed.query.split("&"):
-        if not pair:
-            continue
-        name = pair.split("=", 1)[0]
-        if name and name not in names:
-            names.append(name)
-    sensitive = [n for n in names if is_sensitive_header(n)]
-    return endpoint, names, sensitive
 
 
 def _frame_id_of(frame) -> str | None:
@@ -419,54 +417,145 @@ DOM_PROBE_JS = """
         return results;
     }
 
+    const labelText = (el) => {
+        try {
+            if (el.labels && el.labels.length) {
+                return (el.labels[0].textContent || "").trim().slice(0, 120);
+            }
+            const aria = el.getAttribute && el.getAttribute("aria-label");
+            if (aria) return aria.trim().slice(0, 120);
+            const by = el.getAttribute && el.getAttribute("aria-labelledby");
+            if (by) {
+                const t = document.getElementById(by);
+                if (t) return (t.textContent || "").trim().slice(0, 120);
+            }
+            const wrap = el.closest && el.closest("label");
+            if (wrap) return (wrap.textContent || "").trim().slice(0, 120);
+        } catch (e) { /* ignore */ }
+        return null;
+    };
+
+    // Same boundary the runtime probe applies: a password/secret/token field's
+    // value is never captured, only that it exists. The DOM scan reads el.value
+    // directly, so without this a hidden CSRF token or a filled password would
+    // land in DOM_FORMS in the clear.
+    const SECRET_NAME = /pass|pwd|secret|token|otp|cvv|cvc/i;
+    const isSecretField = (el, type) =>
+        type === "password" ||
+        SECRET_NAME.test(((el.name || "") + " " + (el.id || "")));
+
+    // A structural path, byte-for-byte the same algorithm the runtime probe's
+    // domPath uses, so a form's path here equals the form_path a probe event
+    // records for a field inside it -- which is how an anonymous form's
+    // inventory, inputs and submit are keyed together offline. Works for any
+    // element: a form (for its identity) or a field (for structural fallback).
+    const domPathOf = (el) => {
+        try {
+            const parts = [];
+            let node = el;
+            let depth = 0;
+            while (node && node.nodeType === 1 && depth < 8) {
+                let part = node.tagName.toLowerCase();
+                if (node.id) { parts.unshift(part + "#" + node.id); break; }
+                const parent = node.parentElement;
+                if (parent) {
+                    const same = Array.prototype.filter.call(
+                        parent.children, (c) => c.tagName === node.tagName);
+                    if (same.length > 1) part += ":nth-of-type(" + (same.indexOf(node) + 1) + ")";
+                }
+                parts.unshift(part);
+                node = node.parentElement;
+                depth++;
+            }
+            return parts.join(" > ");
+        } catch (e) { return null; }
+    };
+
     const parseElement = (el) => {
         const tag = el.tagName.toLowerCase();
         const type = (el.type || "").toLowerCase();
+        const secret = isSecretField(el, type);
         const base = {
             tag, type,
             name: el.name || el.getAttribute("name") || null,
             id: el.id || null,
+            // Structural identity for a control with neither id nor name.
+            path: domPathOf(el),
             placeholder: el.placeholder || el.getAttribute("placeholder") || null,
+            // So an untouched but visible control is fully described offline.
+            label: labelText(el),
+            required: !!el.required,
+            disabled: !!el.disabled,
+            readonly: !!el.readOnly,
         };
 
         if (tag === "select") {
+            // Every option, value AND visible label -- the whole catalog, not
+            // just the one the operator happened to choose.
             base.options = Array.from(el.options).map(o => ({
-                value: o.value, text: (o.text || "").trim()
+                value: o.value, text: (o.text || "").trim(), selected: !!o.selected
             }));
+            base.value = el.value;
+            base.multiple = !!el.multiple;
         } else if (["checkbox", "radio"].includes(type)) {
             base.value = el.value;
             base.checked = el.checked;
         } else if (el.value !== undefined) {
-            base.value = el.value;
+            base.value = secret ? null : el.value;
         }
+        if (secret) base.secret = true;
         return base;
     };
 
     const forms = querySelectorAllDeep("form").map((form, idx) => ({
         index: idx,
         id: form.id || null,
+        name: form.getAttribute ? form.getAttribute("name") : null,
+        path: domPathOf(form),
         action: form.action || window.location.href,
         method: (form.method || "GET").toUpperCase(),
         fields: querySelectorAllDeep("input, select, textarea, button", form).map(parseElement)
     }));
 
-    return { forms };
+    // The document instance this inventory belongs to. It is the same clock the
+    // runtime probe stamps on every event (performance.timeOrigin) and changes
+    // on each full navigation, so a form scanned before a navigation and one
+    // scanned after -- same frame, same id -- are told apart offline.
+    let timeOrigin = null;
+    try { timeOrigin = performance.timeOrigin; } catch (e) { timeOrigin = null; }
+
+    return { forms, time_origin: timeOrigin };
 })();
 """
 
 class WebHarvester:
-    def __init__(self, target_url: str, scope: InvestigationScope, session_id: str | None = None):
+    def __init__(self, target_url: str, scope: InvestigationScope,
+                 session_id: str | None = None, output_dir=None):
         self.target_url = target_url
         self.scope = scope
+        self.output_dir = Path(output_dir) if output_dir is not None else default_output_dir()
         self.endpoints = {}
-        self.network_log = []
-        self.dom_snapshots = []
-        self.value_origins = {}
-        self.value_dependencies = []
-        self.openapi_paths = {}
+        self._last_form_inventory = None
+        # Pessimistic by default. A session whose teardown raised leaves a
+        # manifest that says so; only reaching the end of a clean run sets
+        # "clean". A session killed hard writes no manifest at all, and the
+        # workspace reports manifest_present: false for that.
+        self.outcome = "failed"
+        # A COUNT, not a log. `self.network_log` held every request's headers
+        # and body in RAM for the whole session and was written nowhere; the
+        # events are the record, and the manifest needs only how many.
+        self._http_requests = 0
 
-        # Metadata-only record of everything outside the engagement boundary.
-        self.out_of_scope = {}
+        # Running tallies for the manifest's completeness block. Counts, not
+        # buffers: a long session must not accumulate the things it counts.
+        self._capture_gaps = 0
+        self._sensor_errors = 0
+        self._checkpoints = 0
+        self._last_checkpoint = None
+
+        # Metadata-only record of everything outside the engagement boundary:
+        # which endpoints, never what was in them.
+        self.out_of_scope_endpoints: set[str] = set()
         self.skipped_visual_captures = 0
 
         # Third-party frames are skipped on every scan. Counting them here and
@@ -478,7 +567,6 @@ class WebHarvester:
         # Credential values stripped from the generated OpenAPI examples. A
         # spec is a shareable artifact; reporting this number makes the claim
         # checkable instead of implied.
-        self.openapi_credentials_removed = 0
 
         # Snapshot fidelity accounting: a partial offline snapshot must be
         # visible as partial, not silently pass for complete.
@@ -511,18 +599,35 @@ class WebHarvester:
         self.launch_options_record = {}
         self.started_at = datetime.now(UTC)
 
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        self.visual_dir = OUTPUT_DIR / "visual_traces"
+        # --- event spine ---------------------------------------------------
+        # Written incrementally so a crash cannot destroy the session history.
+        self.session_id = session_id or datetime.now(UTC).strftime("sess-%Y%m%d-%H%M%S")
+
+        # Refuse to write into a directory that already holds a session log.
+        # Appending would interleave two sessions' events under two session ids
+        # in one file, which the reader flags as `mixed_sessions` and which no
+        # downstream analysis can un-mix. A fresh timestamped directory never
+        # trips this; an explicit --output pointing at a used directory does,
+        # deliberately. Resume is intentionally NOT supported: continuing a log
+        # correctly means restoring the sequence and event counter, and a
+        # half-done resume that restarts `seq` at 1 is worse than a clean
+        # refusal.
+        log_path = self.output_dir / "events.jsonl"
+        if log_path.exists() and log_path.stat().st_size > 0:
+            raise OutputInUse(
+                f"{log_path} already holds a session's events. Each "
+                f"investigation writes its own directory; choose an empty "
+                f"--output, or move the existing capture aside.")
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.visual_dir = self.output_dir / "visual_traces"
         self.visual_dir.mkdir(parents=True, exist_ok=True)
         self.step_counter = 1
 
-        # --- event spine, dual-write ---------------------------------------
-        # Written incrementally so a crash cannot destroy the session history.
-        self.session_id = session_id or datetime.now(UTC).strftime("sess-%Y%m%d-%H%M%S")
         self.event_log = None
         if EVENTS_AVAILABLE:
             try:
-                self.event_log = EV.EventLog(OUTPUT_DIR / "events.jsonl", self.session_id)
+                self.event_log = EV.EventLog(log_path, self.session_id)
                 self.event_log.emit(
                     EV.Source.ENGINE,
                     EV.EventType.SESSION_START,
@@ -544,14 +649,40 @@ class WebHarvester:
 
     def emit_sensor_error(self, where: str, exc: BaseException, **extra):
         """ScriptScrap failed to observe something -- not the same as nothing happening."""
+        self._sensor_errors += 1
         if self.event_log is None:
             return None
         return self.event_log.sensor_error(EV.Source.PLAYWRIGHT, where, exc, **extra)
 
     def emit_capture_gap(self, reason: str, **extra):
+        self._capture_gaps += 1
         if self.event_log is None:
             return None
         return self.event_log.capture_gap(EV.Source.ENGINE, reason, **extra)
+
+    def checkpoint(self, reason: str = "periodic"):
+        """A heartbeat recovery point during a long session.
+
+        Records how far the capture has got -- events so far, pages open,
+        elapsed seconds -- so an abruptly killed session shows its progress and
+        a running one is visibly alive. Cheap: it reads counters, holds nothing.
+        """
+        if self.event_log is None:
+            return None
+        self._checkpoints += 1
+        self._last_checkpoint = datetime.now(UTC)
+        elapsed = (self._last_checkpoint - self.started_at).total_seconds()
+        return self.emit_event(
+            EV.Source.ENGINE,
+            EV.EventType.CHECKPOINT,
+            reason=reason,
+            events_so_far=self.event_log.count,
+            network_events=self._http_requests,
+            capture_gaps=self._capture_gaps,
+            sensor_errors=self._sensor_errors,
+            pages_open=self.registry.snapshot().get("pages") if self.registry else None,
+            elapsed_seconds=round(elapsed, 1),
+        )
 
     def close_events(self):
         if self.event_log is None:
@@ -561,8 +692,8 @@ class WebHarvester:
             EV.EventType.SESSION_END,
             counters={
                 "endpoints_in_scope": len(self.endpoints),
-                "network_events": len(self.network_log),
-                "out_of_scope_endpoints": len(self.out_of_scope),
+                "network_events": self._http_requests,
+                "out_of_scope_endpoints": len(self.out_of_scope_endpoints),
             },
         )
         self.event_log.close()
@@ -584,18 +715,7 @@ class WebHarvester:
         """
         parsed = urlparse(url)
         key = f"{method} {parsed.hostname or '?'}{parsed.path or '/'}"
-        entry = self.out_of_scope.setdefault(key, {
-            "method": method,
-            "host": parsed.hostname,
-            "path": parsed.path or "/",
-            "count": 0,
-            "statuses": set(),
-            "first_seen": datetime.now(UTC).isoformat(),
-        })
-        if status is None:
-            entry["count"] += 1
-        else:
-            entry["statuses"].add(status)
+        self.out_of_scope_endpoints.add(key)
 
     async def route_filter(self, route):
         """Media-blocking route handler. NOT installed by default any more.
@@ -627,9 +747,15 @@ class WebHarvester:
             )
             return
 
+        # Reserve the step number immediately. With a scanner per page, two
+        # pages can snapshot concurrently; reading the counter and incrementing
+        # it in one go (no await between) keeps their filenames from colliding.
+        step = self.step_counter
+        self.step_counter += 1
+        page_id = self.registry.page_id(page) if self.registry else None
         timestamp = datetime.now().strftime("%H%M%S")
-        file_prefix = self.visual_dir / f"step_{self.step_counter:03d}_{timestamp}"
-        
+        file_prefix = self.visual_dir / f"step_{step:03d}_{timestamp}"
+
         try:
             # 1. Screenshot.
             #    caret="initial" is required for non-destructiveness: Playwright's
@@ -658,15 +784,17 @@ class WebHarvester:
             self.emit_event(
                 EV.Source.ENGINE,
                 EV.EventType.SCREENSHOT,
+                page_id=page_id,
                 url=page.url,
-                step=self.step_counter,
+                step=step,
                 artifact=Path(f"{file_prefix}.png").name,
             )
             self.emit_event(
                 EV.Source.ENGINE,
                 EV.EventType.HTML_SNAPSHOT,
+                page_id=page_id,
                 url=page.url,
-                step=self.step_counter,
+                step=step,
                 artifact=Path(f"{file_prefix}.html").name,
                 bytes=len(result["html"]),
                 **report,
@@ -678,8 +806,6 @@ class WebHarvester:
                     count=report["sheets_not_readable"],
                     note="cross-origin sheet; <link> retained, snapshot is partial",
                 )
-
-            self.step_counter += 1
 
         except Exception as exc:
             # Transient failures are expected when the page navigates mid-capture,
@@ -741,20 +867,9 @@ class WebHarvester:
             elif post_data and not parsed_json and len(self.endpoints[key]["sample_payloads"]) < 2:
                 self.endpoints[key]["sample_payloads"].append(post_data) # Capture raw forms/multipart
 
-            self.network_log.append({
-                "time": datetime.now().isoformat(), 
-                "method": method,
-                "url": url, 
-                "headers": headers,
-                "body": parsed_json or post_data
-            })
+            self._http_requests += 1
             
             print(f"[API ->] {method:6} {url_path}")
-
-            if isinstance(parsed_json, (dict, list)):
-                self._correlate_dependencies(parsed_json, method, url_path)
-
-            self._build_openapi_request(method, url_path, parsed_json or post_data)
 
             # GraphQL collapses an entire API onto one URL, so the operation --
             # not the path -- is the endpoint identity worth recording.
@@ -788,7 +903,21 @@ class WebHarvester:
         if req.resource_type in CAPTURED_RESOURCE_TYPES and req.method != "OPTIONS":
             # Out of scope: record the status code, never read the body.
             if not self.scope.contains(req.url):
-                self._record_out_of_scope(req.method.upper(), req.url, status=response.status)
+                method = req.method.upper()
+                self._record_out_of_scope(method, req.url, status=response.status)
+                # The status has to reach the SPINE, not only the in-memory
+                # tally. The request side emits its own gap; without this one
+                # the log knows a third-party call happened but never how it
+                # answered, and the only record of that was a legacy JSON file.
+                parsed = urlparse(req.url)
+                self.emit_capture_gap(
+                    "out_of_scope",
+                    method=method,
+                    host=parsed.hostname,
+                    path=parsed.path or "/",
+                    status=response.status,
+                    withheld=["headers", "body", "query"],
+                )
                 return
 
             url_path = urlparse(req.url).path or "/"
@@ -805,7 +934,6 @@ class WebHarvester:
                     data = json.loads(resp_text)
                     body_kind = "json"
                     body_for_openapi = data
-                    self._map_response_tokens(data, req.method.upper(), url_path)
 
                     if len(self.endpoints.get(key, {}).get("response_samples", [])) < 2:
                         self.endpoints[key]["response_samples"].append(data)
@@ -815,8 +943,6 @@ class WebHarvester:
                     if len(self.endpoints.get(key, {}).get("response_samples", [])) < 1:
                         self.endpoints[key]["response_samples"].append(resp_text[:500] + "...")
 
-                self._build_openapi_response(
-                    req.method.upper(), url_path, response.status, body_for_openapi)
             except Exception as exc:
                 # Playwright throws for redirects, evicted bodies, and bodies read
                 # after navigation. That is a hole in the evidence, not a non-event.
@@ -875,136 +1001,11 @@ class WebHarvester:
     # ==========================================
     # DATA CORRELATION & OPENAPI
     # ==========================================
-    def _map_response_tokens(self, data, method, path, prefix=""):
-        if isinstance(data, dict):
-            for k, v in data.items(): 
-                self._map_response_tokens(v, method, path, f"{prefix}.{k}" if prefix else str(k))
-        elif isinstance(data, list):
-            for i, v in enumerate(data[:10]): 
-                self._map_response_tokens(v, method, path, f"{prefix}[{i}]")
-        elif isinstance(data, (str, int)) and not isinstance(data, bool):
-            val = str(data)
-            if 3 <= len(val) <= 120:
-                # Index key for value-propagation lookup, not a security primitive.
-                h = hashlib.sha1(  # noqa: S324
-                    val.encode("utf-8", errors="ignore"), usedforsecurity=False
-                ).hexdigest()
-                self.value_origins[h] = {"origin_endpoint": f"{method} {path}", "field": prefix}
-
-    def _correlate_dependencies(self, data, method, path, prefix=""):
-        if isinstance(data, dict):
-            for k, v in data.items(): 
-                self._correlate_dependencies(v, method, path, f"{prefix}.{k}" if prefix else str(k))
-        elif isinstance(data, list):
-            for i, v in enumerate(data[:10]): 
-                self._correlate_dependencies(v, method, path, f"{prefix}[{i}]")
-        elif isinstance(data, (str, int)) and not isinstance(data, bool):
-            # Must match the digest used by _map_response_tokens.
-            h = hashlib.sha1(  # noqa: S324
-                str(data).encode("utf-8", errors="ignore"), usedforsecurity=False
-            ).hexdigest()
-            origin = self.value_origins.get(h)
-            if origin:
-                link = {"source": origin, "consumer": {"endpoint": f"{method} {path}", "field": prefix}}
-                if link not in self.value_dependencies:
-                    self.value_dependencies.append(link)
-
-    def _build_openapi_request(self, method, path, payload):
-        if path not in self.openapi_paths:
-            self.openapi_paths[path] = {}
-        
-        m_lower = method.lower()
-        if m_lower not in self.openapi_paths[path]:
-            self.openapi_paths[path][m_lower] = {
-                "summary": f"Auto-captured {path}",
-                "responses": {}
-            }
-            
-        if payload:
-            content_type = "application/json" if isinstance(payload, (dict, list)) else "application/x-www-form-urlencoded"
-            self.openapi_paths[path][m_lower]["requestBody"] = {
-                "content": {
-                    content_type: {
-                        "schema": {"type": "object"},
-                        # A spec is the artifact people hand to a developer.
-                        # The first real capture put the operator's live login
-                        # password into the /authenticate example verbatim,
-                        # because request bodies were copied here without
-                        # passing through the redaction that already protects
-                        # the shared dataset and the generated client.
-                        "example": self._redact_example(payload)
-                    }
-                }
-            }
-
-    def _redact_example(self, payload):
-        """Strip credential-named fields out of an OpenAPI example.
-
-        The SHAPE is what makes a spec useful -- which fields exist, what type
-        they are -- and that survives. Only the values of credential-named
-        fields are replaced, so the example still shows a developer exactly
-        what to send.
-        """
-        try:
-            from scriptscrap.export.redact import describe_credential, is_credential_name
-        except ImportError:  # pragma: no cover - bare venv without the package
-            return payload
-
-        def scrub(value, depth=0):
-            if depth > 8:
-                return value
-            if isinstance(value, dict):
-                out = {}
-                for key, item in value.items():
-                    if is_credential_name(key):
-                        self.openapi_credentials_removed += 1
-                        out[key] = describe_credential(item)
-                    else:
-                        out[key] = scrub(item, depth + 1)
-                return out
-            if isinstance(value, list):
-                return [scrub(v, depth + 1) for v in value[:20]]
-            return value
-
-        if isinstance(payload, str):
-            # A form body: `username=x&password=y`. Only the credential VALUES
-            # are substituted, in place -- parsing and re-joining the whole
-            # string would decode `%20` back to a space and hand the reader an
-            # example that is no longer a valid urlencoded body.
-            if "=" in payload and "\n" not in payload[:200]:
-                def replace(match):
-                    key, value = match.group(1), match.group(2)
-                    if is_credential_name(unquote_plus(key)):
-                        self.openapi_credentials_removed += 1
-                        return f"{key}={describe_credential(unquote_plus(value))}"
-                    return match.group(0)
-
-                return re.sub(r"([^=&]+)=([^&]*)", replace, payload)
-            return payload
-        return scrub(payload)
-
-    def _build_openapi_response(self, method, path, status, payload):
-        m_lower = method.lower()
-        if path in self.openapi_paths and m_lower in self.openapi_paths[path]:
-            content_type = "application/json" if isinstance(payload, (dict, list)) else "text/html"
-            self.openapi_paths[path][m_lower]["responses"][str(status)] = {
-                "description": "Auto-captured response",
-                "content": {
-                    content_type: {
-                        # Responses carry credentials too: a login endpoint
-                        # answers with the token it just minted.
-                        "example": self._redact_example(payload)
-                    }
-                }
-            }
-
-    # ==========================================
-    # FINAL EXPORT ENGINES
-    # ==========================================
     async def scan_all_frames(self, page):
         if not self.scope.contains(page.url):
             return
 
+        page_id = self.registry.page_id(page) if self.registry else None
         results = []
         skipped_hosts: dict[str, int] = {}
         for frame in page.frames:
@@ -1015,7 +1016,8 @@ class WebHarvester:
                 continue
             try:
                 dom = await frame.evaluate(DOM_PROBE_JS)
-                results.append({"frame_url": frame.url, "data": dom})
+                frame_id = self.registry.frame_id(frame) if self.registry else None
+                results.append({"frame_url": frame.url, "frame_id": frame_id, "data": dom})
             except Exception as exc:
                 # A frame we could not read is a hole, not an empty frame.
                 self.emit_sensor_error(
@@ -1037,7 +1039,6 @@ class WebHarvester:
                 note="third-party frames are not read; scope is enforced per frame",
             )
 
-        self.dom_snapshots.append({"time": datetime.now().isoformat(), "frames": results})
         self.emit_event(
             EV.Source.ENGINE,
             EV.EventType.DOM_SNAPSHOT,
@@ -1045,7 +1046,45 @@ class WebHarvester:
             frames_captured=len(results),
             frames_total=len(page.frames),
             forms=sum(len(r["data"].get("forms", [])) for r in results),
+            # WHICH frames were read, not just how many. dom_structure.json was
+            # the only record of that, and without it the log cannot answer
+            # "did the scan reach the nested iframe?" -- which is the question
+            # a cross-frame form is found or lost by. Every URL here is in
+            # scope by construction: the loop above skips the others.
+            frame_urls=[r["frame_url"] for r in results],
+            forms_by_frame={
+                r["frame_url"]: len(r["data"].get("forms", [])) for r in results
+            },
         )
+
+        inventory = [
+            {"frame_url": r["frame_url"], "frame_id": r["frame_id"],
+             # The document instance (performance.timeOrigin) this frame's forms
+             # were inventoried in, so a re-scan after a navigation is new
+             # evidence and offline keying can separate the two documents.
+             "time_origin": r["data"].get("time_origin"),
+             "forms": r["data"].get("forms", [])}
+            for r in results
+        ]
+        digest = hashlib.sha256(
+            json.dumps(inventory, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        # A scan that found the same structure as the last one is not new
+        # evidence. Emitting it anyway would put 124 copies of one inventory in
+        # the log and make "when did this form appear?" unanswerable by reading.
+        if digest != self._last_form_inventory:
+            self._last_form_inventory = digest
+            # page_id on the envelope so form identity can be made unique across
+            # tabs; per-frame frame_id inside `frames` makes it unique across
+            # frames too.
+            self.emit_event(
+                EV.Source.ENGINE,
+                EV.EventType.DOM_FORMS,
+                page_id=page_id,
+                url=page.url,
+                frames=inventory,
+                inventory_sha256=digest,
+            )
 
     async def _eval_page_world(self, target, expression, *, default=None):
         """Evaluate an expression against the PAGE's globals, not the driver's.
@@ -1118,14 +1157,31 @@ class WebHarvester:
         self.mutations = await self._eval_page_world(
             page, "window.domMutations || []", default=[]) or []
 
+        calls_by_function = Counter(
+            h.get("function") for h in self.js_hooks if h.get("function"))
+
         self.emit_event(
             EV.Source.RUNTIME,
             EV.EventType.RUNTIME_HOOKS,
+            page_id=self.registry.page_id(page) if self.registry else None,
             url=page.url,
             hook_calls=len(self.js_hooks),
-            functions=sorted({h.get("function") for h in self.js_hooks if h.get("function")}),
+            functions=sorted(calls_by_function),
+            # Per call site, not just the set of names. "fetch was patched" and
+            # "fetch was called 312 times" are different observations, and the
+            # second one was thrown away with js_hooks_and_mutations.json.
+            hook_calls_by_function=dict(sorted(calls_by_function.items())),
             dropdown_catalogs=sorted(self.catalogs),
+            # The OPTIONS, not just the select names. What values a field
+            # accepts is the reason a reader opens a dropdown catalogue, and
+            # dropdown_catalogs.json was the only place it lived.
+            dropdown_catalog_options=dict(sorted(self.catalogs.items())),
             jquery_bound_selectors=sorted(self.jquery_events),
+            # Which events, not just which selectors.
+            jquery_bound_events={
+                selector: sorted(events)
+                for selector, events in sorted(self.jquery_events.items())
+            },
             # The legacy MutationObserver's tail, summarised. Incremental
             # mutations now come from the runtime probe as dom_mutation events;
             # this stays folded in here so the two are never confused.
@@ -1145,122 +1201,13 @@ class WebHarvester:
             ),
         )
 
-    def generate_httpx_code(self) -> str:
-        """Generate an API client that contains NO captured credentials.
+    # generate_httpx_code lived here. It emitted generated_client.py, which
+    # is retired above. Its docstring promised the output carried no captured
+    # credentials; nothing in the code enforced that, and the only thing
+    # checking it was a golden-master summary of the file's text. Phase 3
+    # restores a generator that reads the derived model, with those promises
+    # as tests rather than prose.
 
-        Session-authenticating headers are recorded by NAME ONLY so the caller
-        knows what to supply, and are read from the environment at runtime.
-        TLS verification is never disabled.
-        """
-        observed_credential_headers: set[str] = set()
-        for meta in self.endpoints.values():
-            for name in meta["headers"]:
-                if is_sensitive_header(name):
-                    observed_credential_headers.add(name.lower().lstrip(":"))
-
-        cred_list = "\n".join(f"    - {name}" for name in sorted(observed_credential_headers)) \
-            or "    (none observed)"
-
-        preamble = f'''"""Auto-generated API client for {self.target_url}
-
-GENERATED FROM A CAPTURED SESSION — DO NOT COMMIT.
-
-This client deliberately contains NO captured credentials. The investigator
-observed these credential-bearing headers, by name only:
-{cred_list}
-
-Supply them at runtime:
-
-    SCRIPTSCRAP_AUTH_HEADERS   JSON object of header name -> value
-                               e.g. {{"authorization": "Bearer ..."}}
-    SCRIPTSCRAP_COOKIE         raw Cookie header value
-    SCRIPTSCRAP_CA_BUNDLE      path to a CA bundle, if the portal uses a
-                               private/corporate CA
-
-Captured example request bodies are NOT embedded here either. Look them up in
-mcma_openapi_spec.json in this directory, and pass one as `payload`.
-"""
-import asyncio  # noqa: F401  (for callers driving these coroutines)
-import json
-import os
-
-import httpx
-
-
-def _verify():
-    """TLS verification is always on. A private CA is supplied by path."""
-    return os.environ.get("SCRIPTSCRAP_CA_BUNDLE") or True
-
-
-def _auth_headers() -> dict:
-    """Session credentials, from the environment — never from capture."""
-    headers = {{}}
-    raw = os.environ.get("SCRIPTSCRAP_AUTH_HEADERS")
-    if raw:
-        headers.update(json.loads(raw))
-    cookie = os.environ.get("SCRIPTSCRAP_COOKIE")
-    if cookie:
-        headers["cookie"] = cookie
-    if not headers:
-        raise RuntimeError(
-            "No credentials supplied. Set SCRIPTSCRAP_AUTH_HEADERS and/or "
-            "SCRIPTSCRAP_COOKIE. This client intentionally does not embed the "
-            "session credentials that were captured during the investigation."
-        )
-    return headers
-'''
-
-        code_blocks = [preamble]
-        used_names: dict[str, int] = {}
-
-        for idx, ((method, path), meta) in enumerate(self.endpoints.items()):
-            base_name = re.sub(r"[^a-zA-Z0-9_]+", "_", f"{method.lower()}_{path.strip('/')}") or f"req_{idx}"
-            # Distinct endpoints must not silently shadow one another.
-            count = used_names.get(base_name, 0)
-            used_names[base_name] = count + 1
-            fn_name = base_name if count == 0 else f"{base_name}__{count + 1}"
-
-            safe_headers = {
-                k: v for k, v in meta["headers"].items()
-                if not k.startswith(":")
-                and k.lower() not in ("content-length", "host")
-                and not is_sensitive_header(k)
-            }
-
-            # A GET form submission puts every field in the query string, so the
-            # captured URL can carry passwords, CSRF tokens and personal data.
-            # Emit the endpoint, never the captured values: keep scheme/host/path
-            # and document the parameter NAMES so the caller knows what to pass.
-            endpoint_url, param_names, sensitive_params = _split_captured_url(meta["url"])
-            observed_credential_headers.update(sensitive_params)
-
-            param_doc = ""
-            if param_names:
-                param_doc = (
-                    f"\n\n    Observed query parameters (names only, values not retained):"
-                    f"\n        {', '.join(param_names)}"
-                )
-                if sensitive_params:
-                    param_doc += (
-                        f"\n    Credential-shaped, must be supplied by the caller:"
-                        f"\n        {', '.join(sensitive_params)}"
-                    )
-
-            fn = f'''
-async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: dict = None):
-    """{method} {path}  ·  observed statuses: {sorted(meta["statuses"]) or "none"}{param_doc}
-    """
-    url = "{endpoint_url}"
-    headers = {json.dumps(safe_headers, indent=4)}
-    headers.update(_auth_headers())
-    if custom_headers:
-        headers.update(custom_headers)
-    async with httpx.AsyncClient(verify=_verify()) as client:
-        res = await client.{method.lower()}(url, headers=headers, params=params, json=payload)
-        return res.json() if "application/json" in res.headers.get("content-type", "") else res.text
-'''
-            code_blocks.append(fn.strip() + "\n")
-        return "\n".join(code_blocks)
 
     # ==========================================
     # SESSION MANIFEST
@@ -1304,6 +1251,10 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
             "target_url": self.target_url,
             "started_at": self.started_at.isoformat(),
             "finished_at": datetime.now(UTC).isoformat(),
+            # How the session ended. The repository's own interrupted capture
+            # was distinguishable only by its directory name, which is not
+            # evidence.
+            "outcome": self.outcome,
             "scope": self.scope.as_dict(),
             "environment": {
                 "python": sys.version.split()[0],
@@ -1340,7 +1291,6 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
                 "response_samples_per_endpoint": 2,
                 "request_samples_per_endpoint": 2,
                 "listeners_attached_at": "browser_context",
-                "openapi_credential_values_removed": self.openapi_credentials_removed,
                 "out_of_scope_frame_scans": self._out_of_scope_frame_scans,
                 "out_of_scope_frame_hosts": dict(
                     sorted(self._out_of_scope_frame_hosts.items())),
@@ -1369,7 +1319,9 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
                 "WebSocket handshake headers are not exposed by Playwright, so auth "
                 "sent on the upgrade is unobserved. Frames themselves ARE captured.",
                 "httpOnly cookie changes are only visible as periodic snapshots, not "
-                "as a change stream. IndexedDB and Cache Storage are not captured.",
+                "as a change stream. IndexedDB and Cache Storage are INVENTORIED "
+                "(database/store names with record counts, cached request URLs) but "
+                "their record values and cached response bodies are not read.",
                 "Legacy named-function hooks run on a 2s interval and miss calls made "
                 "during initial page parse. Proven unsolvable from injected JS; "
                 "source rewriting is a later, gated capability.",
@@ -1387,23 +1339,54 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
             ],
             "counters": {
                 "endpoints_in_scope": len(self.endpoints),
-                "network_events_logged": len(self.network_log),
-                "dom_snapshots": len(self.dom_snapshots),
+                "network_events_logged": self._http_requests,
                 "visual_traces": self.step_counter - 1,
-                "out_of_scope_endpoints": len(self.out_of_scope),
+                "out_of_scope_endpoints": len(self.out_of_scope_endpoints),
                 "visual_captures_skipped_out_of_scope": self.skipped_visual_captures,
-                "dependency_edges": len(self.value_dependencies),
+                # Page/frame counts and the honesty tallies, so a reader judging
+                # a long session sees its shape without parsing the whole log.
+                "pages": (self.registry.snapshot().get("pages")
+                          if self.registry else None),
+                "frames": (self.registry.snapshot().get("frames")
+                           if self.registry else None),
+                "capture_gaps": self._capture_gaps,
+                "sensor_errors": self._sensor_errors,
+                "checkpoints": self._checkpoints,
+            },
+            # A long agency session runs for hours; a reader needs its shape and
+            # whether it finished cleanly without reading the whole log. Duration
+            # and the completion state make the manifest self-sufficient for that.
+            "duration_seconds": round(
+                (datetime.now(UTC) - self.started_at).total_seconds(), 1),
+            "completion": {
+                "outcome": self.outcome,
+                "clean": self.outcome == "clean",
+                "checkpoints_written": self._checkpoints,
+                "last_checkpoint": (
+                    self._last_checkpoint.isoformat()
+                    if self._last_checkpoint else None),
+                "note": (
+                    "Events stream to disk as they happen and are fsynced "
+                    "periodically, so an abrupt kill leaves everything up to the "
+                    "last flush readable. A session killed hard writes no "
+                    "manifest at all; the workspace reports manifest_present: "
+                    "false for that."
+                ),
             },
             "event_spine": {
-                "mode": "dual_write",
+                "mode": "authoritative",
                 "available": EVENTS_AVAILABLE,
                 "log": "events.jsonl" if self.event_log is not None else None,
                 "events_emitted": self.event_log.count if self.event_log is not None else 0,
                 "note": (
-                    "Events are written alongside the outputs above, incrementally, "
-                    "so an interrupted session still leaves a readable history. The "
-                    "structures in this manifest remain the behavioural authority; "
-                    "nothing reads the event log to produce them yet."
+                    "events.jsonl is the only record this session produces. Events "
+                    "are written incrementally, so an interrupted session still "
+                    "leaves a readable history. The counts above are the "
+                    "investigator's own tally of what it observed; the knowledge "
+                    "derived from the log is produced by `scriptscrap analyze`, "
+                    "which cites the event ids behind every conclusion. The nine "
+                    "legacy JSON outputs that used to be the authority here were "
+                    "retired once the derived layer covered them."
                 ),
             },
             "snapshot_fidelity": {
@@ -1425,45 +1408,36 @@ async def {fn_name}(payload: dict = None, params: dict = None, custom_headers: d
         # here rather than only in main(). Idempotent.
         _configure_stdout()
 
-        (OUTPUT_DIR / "network_traffic.json").write_text(json.dumps(self.network_log, indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "dom_structure.json").write_text(json.dumps(self.dom_snapshots, indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "api_dependencies.json").write_text(json.dumps(self.value_dependencies, indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "generated_client.py").write_text(self.generate_httpx_code(), encoding="utf-8")
-        
-        # New Introspection Dumps
-        (OUTPUT_DIR / "dropdown_catalogs.json").write_text(json.dumps(getattr(self, 'catalogs', {}), indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "jquery_events.json").write_text(json.dumps(getattr(self, 'jquery_events', {}), indent=2, ensure_ascii=False), encoding="utf-8")
-        (OUTPUT_DIR / "js_hooks_and_mutations.json").write_text(json.dumps({"function_calls": getattr(self, 'js_hooks', []), "dom_mutations": getattr(self, 'mutations', [])}, indent=2), encoding="utf-8")
-
-        # OpenAPI Spec
-        openapi_spec = {
-            "openapi": "3.0.0",
-            "info": {"title": "MCMA Auto-Synthesized API", "version": "1.0"},
-            "paths": self.openapi_paths
-        }
-        (OUTPUT_DIR / "mcma_openapi_spec.json").write_text(json.dumps(openapi_spec, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        # Metadata-only record of traffic outside the engagement boundary.
-        out_of_scope_serialisable = {
-            key: {**entry, "statuses": sorted(entry["statuses"])}
-            for key, entry in self.out_of_scope.items()
-        }
-        (OUTPUT_DIR / "out_of_scope_metadata.json").write_text(
-            json.dumps(out_of_scope_serialisable, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Nine files used to be written here -- network_traffic.json,
+        # dom_structure.json, api_dependencies.json, generated_client.py,
+        # dropdown_catalogs.json, jquery_events.json,
+        # js_hooks_and_mutations.json, mcma_openapi_spec.json and
+        # out_of_scope_metadata.json. They predate the event spine and every
+        # fact in them is now derived by `scriptscrap analyze`, which cites the
+        # event ids behind each conclusion instead of asserting it.
+        #
+        # They are gone rather than deprecated because two output contracts
+        # means every later change has to be made twice, and a reader has to
+        # know which one is current. The out-of-scope statuses those files were
+        # the only record of now reach the spine from handle_response.
+        #
+        # A client generator returns in Phase 3, generated from the derived
+        # model and tested -- the retired one asserted its own safety in a
+        # docstring with nothing checking it.
 
         # Session manifest: makes the evidence self-describing.
-        (OUTPUT_DIR / "session_manifest.json").write_text(
+        (self.output_dir / "session_manifest.json").write_text(
             json.dumps(self.build_manifest(), indent=2, ensure_ascii=False), encoding="utf-8")
 
-        (OUTPUT_DIR / "SECURITY.md").write_text(SECURITY_NOTICE, encoding="utf-8")
+        (self.output_dir / "SECURITY.md").write_text(SECURITY_NOTICE, encoding="utf-8")
 
         # Close the event spine last: it records the session end.
         self.close_events()
 
-        written = sorted(p.name for p in OUTPUT_DIR.glob("*.*"))
-        print(f"\n🏆 Exported {len(written)} files + visual traces to ./{OUTPUT_DIR.name}/")
+        written = sorted(p.name for p in self.output_dir.glob("*.*"))
+        print(f"\n🏆 Exported {len(written)} files + visual traces to ./{self.output_dir.name}/")
         print(f"   In-scope endpoints: {len(self.endpoints)} | "
-              f"out-of-scope (metadata only): {len(self.out_of_scope)}")
+              f"out-of-scope (metadata only): {len(self.out_of_scope_endpoints)}")
         print("   ⚠  This directory contains unredacted authenticated capture. "
               "It is gitignored. Do not share it.")
 
@@ -1483,7 +1457,7 @@ def start_forensic_layer(engine, forensic_config):
 
     engine.forensic_config = forensic_config
     try:
-        blob_root = OUTPUT_DIR / "blobs"
+        blob_root = engine.output_dir / "blobs"
         engine.blob_store = SENSORS.BlobStore(
             blob_root, max_bytes=forensic_config.max_blob_bytes)
         engine.extension_sensor = SENSORS.ExtensionSensor(engine, engine.blob_store)
@@ -1541,6 +1515,10 @@ async def attach_engine_to_page(page, engine):
     window the application opens is observed on the same footing as this page.
     """
     context = page.context
+    # The page the operator started on. Its context-level init script installs
+    # the isolated probe listeners correctly; a popup or new tab's do NOT (a
+    # Camoufox quirk), so those are re-armed per navigation below.
+    engine._initial_page = page
 
     # Legacy named-function hooks. Their parse-time blind spot is documented in
     # the session manifest and is deliberately NOT solved here; source rewriting
@@ -1552,8 +1530,8 @@ async def attach_engine_to_page(page, engine):
     # the fallback for a browser that does not isolate worlds.
     await page.add_init_script(HOOK_AND_OBSERVER_JS)
 
-    # Network capture stays on the engine: it also feeds the exporters that
-    # remain the behavioural authority.
+    # Network capture stays on the engine: it also feeds the running tally the
+    # session manifest reports.
     context.on("request", engine.handle_request)
     context.on("response", engine.handle_response)
     context.on("requestfailed", engine.handle_request_failed)
@@ -1586,6 +1564,18 @@ async def attach_engine_to_page(page, engine):
             # The legacy hooks need the same world for the same reason.
             with contextlib.suppress(Exception):
                 await frame.evaluate("mw:" + HOOK_AND_OBSERVER_JS)
+            # Isolated-world listeners from the context init script do not fire
+            # in a popup or new tab. Re-arm them in the live document of every
+            # NON-initial page's main frame. The initial page is skipped: its
+            # context-script listeners work, and re-arming there would attach a
+            # second set and double every user action.
+            try:
+                is_main_frame = frame.parent_frame is None
+                owner_page = frame.page
+            except Exception:
+                return
+            if is_main_frame and owner_page is not getattr(engine, "_initial_page", None):
+                await engine.runtime_sensor.rearm_isolated(frame)
 
         def on_navigated(frame) -> None:
             asyncio.get_running_loop().create_task(install_main_world(frame))
@@ -1634,6 +1624,182 @@ async def background_dom_scanner(page, engine):
             # The scanner is the only thing driving periodic capture. If it keeps
             # failing, the session looks quiet when it is actually unobserved.
             engine.emit_sensor_error("background_dom_scanner", exc)
+
+class PageCoverage:
+    """Full capture coverage for every in-scope page, tab and popup.
+
+    Each page an application opens is worked exactly like the first: its own
+    scanner task (visual snapshots, DOM/form inventory, storage snapshots on
+    change) plus the context-level sensors and per-navigation main-world
+    instrumentation that `attach_engine_to_page` already wires for every page.
+    A page's scanner is cancelled AND awaited when the page closes, so a closing
+    popup cannot leave a task scanning a dead page. On session end every
+    remaining in-scope page is drained and its final state extracted -- not only
+    the page the operator started on, which was the previous behaviour and lost
+    everything a popup held.
+
+    The checkpoint heartbeat is session-level here, not per page, so a session
+    with three tabs open does not write three times the checkpoints.
+    """
+
+    def __init__(self, engine, *, checkpoint_interval: float = 30.0):
+        self.engine = engine
+        self.checkpoint_interval = checkpoint_interval
+        self.tasks: dict = {}          # page -> cover Task
+        self.pages: list = []          # order of appearance, for a stable drain
+        self._observed: set = set()    # guard: observe each page exactly once
+        self._closing: list = []       # cancel-and-await tasks for closed pages
+        self._was_in_scope: set = set()  # pages we began covering while in scope
+        self._captured: set = set()    # pages whose first snapshot completed
+        self._checkpoint_task = None
+
+    def start(self, context, initial_page) -> None:
+        self.engine._initial_page = initial_page
+        # Subscribe FIRST, then enumerate every page that already exists, so a
+        # popup opened during the initial navigation -- before or after this
+        # call -- is covered. `_observed` makes the two paths idempotent.
+        context.on("page", self._observe)
+        for page in list(getattr(context, "pages", []) or []):
+            self._observe(page)
+        self._observe(initial_page)
+        self.engine.checkpoint(reason="session_start")
+        self._checkpoint_task = asyncio.get_running_loop().create_task(
+            self._checkpoint_loop())
+
+    def _observe(self, page) -> None:
+        if page in self._observed:
+            return
+        self._observed.add(page)
+        self.pages.append(page)
+        page.on("close", lambda p=page: self._on_close(p))
+        self.tasks[page] = asyncio.get_running_loop().create_task(
+            self._cover_page(page))
+
+    async def _cover_page(self, page) -> None:
+        """Cover one page: an eager first snapshot, then the periodic scan.
+
+        The first snapshot does NOT wait for the 2-second poll, so a popup used
+        and closed in under two seconds still yields its DOM/form inventory and a
+        storage snapshot. A page opened while off-scope (about:blank during
+        launch) is picked up by the periodic loop once it navigates in-scope.
+        """
+        try:
+            with contextlib.suppress(Exception):
+                await page.wait_for_load_state("load")
+            in_scope = self.engine.scope.contains(getattr(page, "url", "") or "")
+            if in_scope:
+                self._was_in_scope.add(page)
+                # A popup/new tab's isolated listeners from the context init
+                # script do not fire; re-arm them before the operator can act.
+                if page is not getattr(self.engine, "_initial_page", None):
+                    with contextlib.suppress(Exception):
+                        await self.engine.runtime_sensor.rearm_isolated(page.main_frame)
+                await self._snapshot_once(page, reason="page_observed")
+                self._captured.add(page)
+            await self._scan_loop(page, seeded_in_scope=in_scope)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.engine.emit_sensor_error("page_coverage", exc)
+
+    async def _snapshot_once(self, page, *, reason: str) -> None:
+        """One full snapshot of a page: DOM/form inventory, visual, storage."""
+        await self.engine.scan_all_frames(page)
+        await self.engine.capture_visual_state(page)
+        if self.engine.storage_sensor is not None:
+            await self.engine.storage_sensor.snapshot(page, reason=reason)
+
+    async def _scan_loop(self, page, *, seeded_in_scope: bool) -> None:
+        last_hash = ""
+        last_url = page.url if seeded_in_scope else None
+        while True:
+            await asyncio.sleep(2.0)
+            try:
+                current_url = page.url
+                if not self.engine.scope.contains(current_url or ""):
+                    continue
+                content = await page.content()
+                curr_hash = hashlib.md5(  # noqa: S324
+                    content.encode("utf-8"), usedforsecurity=False).hexdigest()
+                navigated = current_url != last_url
+                if navigated or curr_hash != last_hash:
+                    last_hash = curr_hash
+                    last_url = current_url
+                    if page not in self._was_in_scope:
+                        self._was_in_scope.add(page)
+                    await self.engine.scan_all_frames(page)
+                    await self.engine.capture_visual_state(page)
+                    if navigated and self.engine.storage_sensor is not None:
+                        await self.engine.storage_sensor.snapshot(page, reason="navigation")
+                    self._captured.add(page)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.engine.emit_sensor_error("background_dom_scanner", exc)
+
+    def _on_close(self, page) -> None:
+        # A page that was in scope but closed before its first snapshot took its
+        # final state with it -- say so rather than letting it look like a page
+        # that simply held nothing.
+        if page in self._was_in_scope and page not in self._captured:
+            self.engine.emit_capture_gap(
+                "page_closed_before_capture",
+                page_id=(self.engine.registry.page_id(page)
+                         if self.engine.registry else None),
+                note="an in-scope page closed before its DOM/form and storage "
+                     "state could be snapshotted; user actions on it may still "
+                     "have been captured live by the probe",
+            )
+        task = self.tasks.pop(page, None)
+        if task is None:
+            return
+        # Cancel now; await on a helper task, because this runs in a sync event
+        # callback where we cannot await. stop() also awaits it, so nothing is
+        # left dangling at session end.
+        task.cancel()
+        self._closing.append(asyncio.get_running_loop().create_task(
+            self._await_cancelled(task)))
+
+    @staticmethod
+    async def _await_cancelled(task) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _checkpoint_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.checkpoint_interval)
+                self.engine.checkpoint(reason="periodic")
+        except asyncio.CancelledError:
+            raise
+
+    async def stop(self) -> None:
+        """Cancel every scanner, then drain and extract every in-scope page."""
+        if self._checkpoint_task is not None:
+            self._checkpoint_task.cancel()
+            await self._await_cancelled(self._checkpoint_task)
+
+        for task in list(self.tasks.values()):
+            task.cancel()
+        for task in list(self.tasks.values()):
+            await self._await_cancelled(task)
+        for task in self._closing:
+            await self._await_cancelled(task)
+        self.tasks.clear()
+
+        # Drain and extract EVERY remaining in-scope page, in order of
+        # appearance. A popup the operator filled and left open is emptied here.
+        for page in self.pages:
+            with contextlib.suppress(Exception):
+                if page.is_closed():
+                    continue
+            if not self.engine.scope.contains(getattr(page, "url", "") or ""):
+                continue
+            try:
+                await self.engine.extract_active_introspection(page)
+            except Exception as exc:
+                self.engine.emit_sensor_error("page_coverage_drain", exc)
+
 
 def _configure_stdout():
     """Keep the emoji status output from killing the run on a cp1252 console.
@@ -1685,24 +1851,151 @@ def announce_browser_baseline(engine) -> dict:
     return comparison
 
 
-async def main():
+def parse_cli_args(argv=None):
+    """Flags for a real agency session. The URL and scope stay interactive.
+
+    Forensic mode is off by default, and source rewriting -- the one thing that
+    changes what the browser executes -- is a SEPARATE flag, because observation
+    and intervention must not share a switch.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="camoufox_investigator",
+        description="Record a long agency session for offline analysis.")
+    parser.add_argument(
+        "--forensic", action="store_true",
+        help="enable the Firefox forensic extension: full response bodies, "
+             "script source before parse, and the real cookie jar (httpOnly). "
+             "Off by default; whatever is enabled is written into the manifest.")
+    parser.add_argument(
+        "--forensic-max-body-bytes", type=int, default=2 * 1024 * 1024,
+        help="largest response body the forensic layer stores (default 2 MiB); "
+             "larger bodies are recorded as skipped with a reason.")
+    parser.add_argument(
+        "--rewrite-source", action="append", default=[], metavar="SCRIPT:fn1,fn2",
+        help="INTERVENTION, requires --forensic: instrument named functions in a "
+             "matching script from their first execution. This alters the code "
+             "the browser runs; every rewritten script records both hashes.")
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="run without a visible window (for an automated capture).")
+    parser.add_argument(
+        "--output", "-o", default=None, metavar="DIR",
+        help="write this session here. Default: a timestamped directory under "
+             "scriptscrap_output/. Each investigation gets its own directory; "
+             "the tool refuses to write into one that already holds a session.")
+    return parser.parse_args(argv)
+
+
+def forensic_config_from_args(args):
+    """Build a ForensicConfig from the parsed flags, or None for normal mode.
+
+    Enforces the gate: source rewriting cannot be requested without forensic
+    mode, and it is never turned on as a side effect of enabling forensic mode.
+    """
+    from scriptscrap.config import ForensicConfig, RewriteTarget
+
+    if args.rewrite_source and not args.forensic:
+        raise SystemExit(
+            "--rewrite-source requires --forensic: rewriting a response before "
+            "the browser parses it is intervention, and it must be asked for "
+            "on top of forensic capture, never on its own.")
+    if not args.forensic:
+        return None
+
+    targets = []
+    for spec in args.rewrite_source:
+        script, _, functions = spec.partition(":")
+        names = [f.strip() for f in functions.split(",") if f.strip()]
+        if script and names:
+            targets.append(RewriteTarget(script=script.strip(), functions=names))
+    return ForensicConfig(
+        enabled=True,
+        max_body_bytes=args.forensic_max_body_bytes,
+        source_rewrite=bool(targets),
+        rewrite_targets=targets,
+    )
+
+
+def active_session_banner(forensic_config) -> list[str]:
+    """What the running capture is ACTUALLY recording, per mode.
+
+    Normal mode records user actions, network requests with a small SAMPLE of
+    each response body, DOM/form inventories, storage snapshots and periodic
+    visual snapshots. It does NOT capture full response bodies, script source,
+    or the real cookie jar -- claiming it did was the old banner's error.
+    Forensic mode adds exactly those, via the extension, and says so.
+    """
+    forensic = bool(forensic_config and forensic_config.enabled)
+    lines = [
+        "🟢 CAPTURE IS ACTIVE — " + ("FORENSIC mode" if forensic else "NORMAL mode"),
+        "1. Give the browser to the employee; let them work normally.",
+    ]
+    if forensic:
+        lines += [
+            "2. Recording: user actions, network traffic, DOM/form inventories,",
+            "   storage snapshots, and — via the extension — FULL response bodies,",
+            "   script source before parse, and the real cookie jar (incl. httpOnly).",
+        ]
+        if forensic_config.rewriting_active:
+            lines.append("   SOURCE REWRITING is ACTIVE: this session is not pure observation.")
+    else:
+        lines += [
+            "2. Recording: user actions, network requests with a SAMPLE of each",
+            "   response body, DOM/form inventories and storage snapshots. This",
+            "   mode does NOT capture full bodies, script source or the cookie jar;",
+            "   run with --forensic for those.",
+        ]
+    lines.append("3. Press ENTER in this terminal ONLY when the whole session is done.")
+    return lines
+
+
+async def main(argv=None):
     _configure_stdout()
+    args = parse_cli_args(argv)
+    forensic_config = forensic_config_from_args(args)
 
     target_url = input("Enter Target Portal URL: ").strip()
     if not target_url.startswith("http"):
         target_url = "https://" + target_url
 
     scope = prompt_for_scope(target_url)
-    engine = WebHarvester(target_url, scope)
+    output_dir = Path(args.output) if args.output else default_output_dir()
+    try:
+        engine = WebHarvester(target_url, scope, output_dir=output_dir)
+    except OutputInUse as exc:
+        raise SystemExit(str(exc)) from None
+    print(f"[OUTPUT] This session -> {engine.output_dir}")
 
+    async def interact(page, engine):
+        print("\n" + "=" * 60)
+        for line in active_session_banner(forensic_config):
+            print(line)
+        print("=" * 60 + "\n")
+        await asyncio.to_thread(input, "")
+
+    await run_capture(engine, target_url=target_url, forensic_config=forensic_config,
+                      headless=args.headless, interact=interact, announce=True)
+
+
+async def run_capture(engine, *, target_url, forensic_config, headless, interact,
+                      locale="fr-FR", timezone_id="Europe/Paris", announce=False):
+    """The one production capture runner, shared by the CLI and the tests.
+
+    Launch -> attach sensors -> START COVERAGE (before the first navigation, so a
+    popup opened during it cannot be missed) -> navigate -> hand control to
+    `interact` (the CLI waits for ENTER; a test scripts the workflow) -> stop
+    coverage, which drains every in-scope page -> export. Both entry points use
+    this, so a test cannot exercise a different page-coverage ordering from
+    production.
+    """
     # exclude_addons is load-bearing: Camoufox installs uBlock Origin as a
     # default addon, which silently filters requests out of the capture.
-    #
     # main_world_eval is equally load-bearing: without it the runtime probe's
-    # patched instruments land in the isolated world and observe nothing, which
-    # is exactly how a whole capture came back with zero fetch/XHR evidence.
+    # patched instruments land in the isolated world and observe nothing.
     launch_options = {
-        "headless": False,
+        "headless": headless,
         "humanize": True,
         "os": "windows",
         "geoip": False,
@@ -1710,39 +2003,53 @@ async def main():
         "exclude_addons": [DefaultAddons.UBO],
         "main_world_eval": True,
     }
+    if forensic_config is not None:
+        launch_options.update(start_forensic_layer(engine, forensic_config))
+        if announce:
+            print("    [forensic] extension enabled — bodies, script source, "
+                  "real cookie jar. See the manifest for exactly what is on.")
+            if forensic_config.rewriting_active:
+                print("    [forensic] SOURCE REWRITING ACTIVE — not pure observation.")
     engine.record_launch_options(launch_options)
 
-    print("\n🦊 [CAMOUFOX] Booting active introspection engine...")
-    print("    [addons] uBlock Origin EXCLUDED — capturing the app's real requests.")
+    if announce:
+        print("\n🦊 [CAMOUFOX] Booting active introspection engine...")
+        print("    [addons] uBlock Origin EXCLUDED — capturing real requests.")
     announce_browser_baseline(engine)
+
+    coverage = None
     try:
         async with AsyncCamoufox(**launch_options) as browser:
-            page = await browser.new_page(locale="fr-FR", timezone_id="Europe/Paris")
-
+            page = await browser.new_page(locale=locale, timezone_id=timezone_id)
             await attach_engine_to_page(page, engine)
 
-            print(f"🚀 Infiltrating {target_url}...")
+            # Coverage BEFORE the first navigation: a page the target opens
+            # during load is then observed, not missed.
+            coverage = PageCoverage(engine)
+            coverage.start(page.context, page)
+
+            if announce:
+                print(f"🚀 Infiltrating {target_url}...")
             await page.goto(target_url, wait_until="load")
 
-            scanner_task = asyncio.create_task(background_dom_scanner(page, engine))
+            await interact(page, engine)
 
-            print("\n" + "=" * 60)
-            print("🟢 AUTOMATIC SPY IS ACTIVE")
-            print("1. Interact with the website normally (process a Garage Conventionné dossier).")
-            print("2. The script captures full bodies, OpenAPI specs, and JS functions automatically.")
-            print("3. Press ENTER in this terminal ONLY when you are done.")
-            print("=" * 60 + "\n")
-
-            await asyncio.to_thread(input, "")
-            scanner_task.cancel()
-            
-            # Final dump of hidden in-memory state
-            await engine.extract_active_introspection(page)
-            
-    except Exception as e:
-        print(f"\n⚠️ Session interrupted: {e}")
+            await coverage.stop()
+            engine.outcome = "clean"
+    except KeyboardInterrupt:
+        engine.outcome = "interrupted"
+        print("\n⚠️ Session interrupted by the operator")
+        if coverage is not None:
+            with contextlib.suppress(Exception):
+                await coverage.stop()
+    except Exception as exc:
+        engine.outcome = "failed"
+        print(f"\n⚠️ Session ended with an error: {exc}")
     finally:
+        if forensic_config is not None:
+            stop_forensic_layer(engine)
         engine.export()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -14,9 +14,10 @@ Two rules the rest of the system depends on:
    belongs to a derived layer that cites these events by id -- not to the events
    themselves.
 
-During M1 this runs in DUAL-WRITE mode: the existing investigator structures
-remain the behavioural authority and the event log is written alongside them, so
-the model can be proven against real runs before anything depends on it.
+This log is the only record a session produces. It was dual-written alongside
+the legacy JSON outputs while the model was proven against real runs; those
+were retired once the derived layer covered them, so everything downstream now
+depends on this envelope being right.
 """
 
 from __future__ import annotations
@@ -39,6 +40,11 @@ class EventType(StrEnum):
     # Session lifecycle
     SESSION_START = "session_start"
     SESSION_END = "session_end"
+    # A periodic heartbeat during a long session: a recovery point that records
+    # progress (events so far, pages open, elapsed) so an abruptly interrupted
+    # capture still shows how far it got, and a running session can be seen to
+    # be alive rather than merely quiet.
+    CHECKPOINT = "checkpoint"
 
     # Page / frame / navigation
     PAGE_OPENED = "page_opened"
@@ -68,10 +74,18 @@ class EventType(StrEnum):
 
     # User actions (runtime probe)
     USER_CLICK = "user_click"
+    USER_DBLCLICK = "user_dblclick"
+    USER_RIGHTCLICK = "user_rightclick"
     USER_INPUT = "user_input"
     USER_CHANGE = "user_change"
     USER_SUBMIT = "user_submit"
     USER_KEY = "user_key"
+    # Richer agency interactions. Hover-opened menus, drag/drop, and the
+    # meaningful scrolling that reveals virtualized rows -- all bounded and
+    # deduplicated at capture time so a busy page cannot flood the log.
+    USER_HOVER = "user_hover"
+    USER_DRAG = "user_drag"
+    USER_SCROLL = "user_scroll"
 
     # Runtime APIs that trigger network activity (runtime probe)
     RUNTIME_FETCH = "runtime_fetch"
@@ -82,6 +96,11 @@ class EventType(StrEnum):
 
     # DOM / artifacts
     DOM_SNAPSHOT = "dom_snapshot"
+    # The structure a DOM scan actually read: forms and their fields, per frame.
+    # dom_snapshot counts them; this names them. Emitted only when the inventory
+    # CHANGES, so a page scanned 124 times contributes one event per distinct
+    # shape rather than 124 copies of one.
+    DOM_FORMS = "dom_forms"
     DOM_MUTATION = "dom_mutation"
     SCREENSHOT = "screenshot"
     HTML_SNAPSHOT = "html_snapshot"
@@ -90,6 +109,11 @@ class EventType(StrEnum):
     CONSOLE_MESSAGE = "console_message"
     PAGE_EXCEPTION = "page_exception"
     DOWNLOAD = "download"
+    # A JavaScript dialog (alert/confirm/prompt/beforeunload). The type, message
+    # and default are observed; the employee's real choice is NOT, because the
+    # automation layer intercepts dialogs -- recorded honestly as the recorder's
+    # handling plus a capture gap, never as a choice the operator made.
+    DIALOG = "dialog"
 
     # State
     STORAGE_SNAPSHOT = "storage_snapshot"

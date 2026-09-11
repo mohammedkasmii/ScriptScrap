@@ -22,6 +22,26 @@ from typing import Any
 
 from .models import ANALYSIS_VERSION, AnalysisResult
 
+# The SQL shape of this file. Bumped when a table, column, index or constraint
+# changes -- NOT when inference changes, which is what ANALYSIS_VERSION is for.
+# See docs/derived-store-versioning.md for the rule and the history.
+#
+# 1: the schema as of the events-index work (analysis_runs.log_size,
+#    analysis_runs.log_sha256, the events table and its four indexes).
+# 2: workflow_steps, plus state_transitions.trigger_type, .trigger_element_key
+#    and .trigger_event_id (Plan C).
+# 3: state_transitions.trigger and findings.message become nullable. Both are
+#    free text the export policy drops, and this store now persists a SANITISED
+#    model as well as a raw one. NOT NULL said the derived model always has
+#    them; a sanitised one legitimately does not.
+# 4: ix_events_id is UNIQUE, so a duplicated event id cannot enter the index.
+STORE_SCHEMA_VERSION = 4
+
+
+class StoreSchemaError(RuntimeError):
+    """This file's SQL shape is not the one this code writes."""
+
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 
@@ -30,7 +50,31 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     session_id       TEXT    NOT NULL,
     created_at       TEXT    NOT NULL,
     analysis_version INTEGER NOT NULL,
-    event_count      INTEGER NOT NULL
+    event_count      INTEGER NOT NULL,
+    -- The log this run's byte offsets were built from. An offset is only
+    -- valid for the exact bytes it was computed against, so a reader that
+    -- cannot match both of these must refuse to serve evidence rather than
+    -- return whatever now sits at that position.
+    log_size         INTEGER,
+    log_sha256       TEXT
+);
+
+-- The evidence index: one row per event, holding the ENVELOPE and where the
+-- line lives in events.jsonl. The payload is deliberately NOT here. Copying
+-- it would make this file a second source of truth, and the whole store is
+-- built on being derived and deletable.
+CREATE TABLE IF NOT EXISTS events (
+    run_id      INTEGER NOT NULL REFERENCES analysis_runs(id),
+    event_id    TEXT    NOT NULL,
+    seq         INTEGER NOT NULL,
+    type        TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    t_wall      TEXT    NOT NULL,
+    t_mono      REAL    NOT NULL,
+    page_id     TEXT,
+    frame_id    TEXT,
+    byte_offset INTEGER NOT NULL,
+    byte_length INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS endpoints (
@@ -148,10 +192,32 @@ CREATE TABLE IF NOT EXISTS state_transitions (
     run_id            INTEGER NOT NULL REFERENCES analysis_runs(id),
     from_state        TEXT    NOT NULL,
     to_state          TEXT    NOT NULL,
-    trigger           TEXT    NOT NULL,
+    -- Nullable: a human label like "user_click #Delete", dropped by the export
+    -- policy. `trigger_type` and `trigger_element_key` survive sanitisation and
+    -- are the machine-readable half.
+    trigger           TEXT,
+    trigger_type        TEXT,
+    trigger_element_key TEXT,
+    trigger_event_id    TEXT,
     observation_count INTEGER NOT NULL,
     evidence_ids      TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES analysis_runs(id),
+    ordinal         INTEGER NOT NULL,
+    seq             INTEGER NOT NULL,
+    kind            TEXT    NOT NULL,
+    element_key     TEXT,
+    url_pattern     TEXT,
+    repeat_count    INTEGER NOT NULL,
+    value_recorded  INTEGER NOT NULL,
+    key             TEXT,
+    evidence_ids    TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_workflow_run ON workflow_steps(run_id, ordinal);
 
 CREATE TABLE IF NOT EXISTS technologies (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,7 +234,7 @@ CREATE TABLE IF NOT EXISTS findings (
     run_id       INTEGER NOT NULL REFERENCES analysis_runs(id),
     kind         TEXT    NOT NULL,
     severity     TEXT    NOT NULL,
-    message      TEXT    NOT NULL,
+    message      TEXT,          -- nullable: free text, dropped by the export policy
     count        INTEGER NOT NULL,
     evidence_ids TEXT    NOT NULL
 );
@@ -179,6 +245,15 @@ CREATE INDEX IF NOT EXISTS ix_deps_run       ON dependencies(run_id);
 CREATE INDEX IF NOT EXISTS ix_elements_run   ON ui_elements(run_id);
 CREATE INDEX IF NOT EXISTS ix_fields_schema  ON schema_fields(schema_id);
 CREATE INDEX IF NOT EXISTS ix_selectors_elem ON selectors(element_id);
+
+-- Evidence drill-through is a point lookup by event_id; the timeline is a
+-- filtered walk in seq order. Both are the workspace's hot path.
+-- UNIQUE: an event id that resolves to two rows makes every citation of it
+-- ambiguous, and `EventStore.get` uses fetchone().
+CREATE UNIQUE INDEX IF NOT EXISTS ix_events_id ON events(run_id, event_id);
+CREATE INDEX IF NOT EXISTS ix_events_seq    ON events(run_id, seq);
+CREATE INDEX IF NOT EXISTS ix_events_type   ON events(run_id, type, seq);
+CREATE INDEX IF NOT EXISTS ix_events_source ON events(run_id, source, seq);
 """
 
 
@@ -189,12 +264,68 @@ def _dumps(value: Any) -> str:
 class DerivedStore:
     """Writes an AnalysisResult into SQLite and reads it back."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, on_mismatch: str = "rebuild") -> None:
+        """Open, and reconcile the file's schema version with this code's.
+
+        The store is DERIVED. Everything in it can be recomputed from
+        events.jsonl, so an incompatible file is discarded rather than migrated
+        -- an ALTER TABLE path here would be work to preserve data that is
+        reproducible by definition, and a second thing to get wrong.
+
+        `on_mismatch="raise"` exists for a caller that would rather stop.
+        """
+        if on_mismatch not in {"rebuild", "raise"}:
+            raise ValueError(
+                f"on_mismatch must be 'rebuild' or 'raise', got {on_mismatch!r}")
+
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.rebuilt = False
+        self.replaced = 0
+
+        found = self._version_on_disk()
+        if found > STORE_SCHEMA_VERSION:
+            raise StoreSchemaError(
+                f"{self.path} was written by a newer ScriptScrap (store schema "
+                f"{found}, this build writes {STORE_SCHEMA_VERSION}). Refusing to "
+                f"touch it.")
+        if found < STORE_SCHEMA_VERSION and self._has_tables():
+            if on_mismatch == "raise":
+                raise StoreSchemaError(
+                    f"{self.path} is store schema {found}, this build writes "
+                    f"{STORE_SCHEMA_VERSION}. Delete it and rebuild: "
+                    f"`scriptscrap analyze --rebuild`.")
+            self.path.unlink()
+            self.rebuilt = True
+
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self.conn.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
+        self.conn.commit()
+
+    def _version_on_disk(self) -> int:
+        """The stamp on the file, or the current version when there is no file.
+
+        A missing file takes the "create" path without a spurious rebuild, and
+        so does a zero-byte one -- `_has_tables()` is what distinguishes an
+        empty file from a pre-versioning store.
+        """
+        if not self.path.exists():
+            return STORE_SCHEMA_VERSION
+        conn = sqlite3.connect(self.path)
+        try:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            conn.close()
+
+    def _has_tables(self) -> bool:
+        conn = sqlite3.connect(self.path)
+        try:
+            return bool(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone())
+        finally:
+            conn.close()
 
     def close(self) -> None:
         self.conn.commit()
@@ -207,16 +338,64 @@ class DerivedStore:
         self.close()
 
     # -- writing -----------------------------------------------------------
-    def write(self, result: AnalysisResult) -> int:
-        """Persist one analysis run. Returns its run id."""
+    def _prune(self, session_id: str, keep: int) -> int:
+        """Drop superseded runs for one session. Returns how many were removed.
+
+        Child tables hang off `endpoints.id`, `schemas.id` and `ui_elements.id`
+        rather than off `run_id`, so they are deleted through their parents --
+        SQLite does not enforce the REFERENCES clauses without
+        `PRAGMA foreign_keys`, and turning that on mid-life would change the
+        behaviour of every existing store.
+        """
+        stale = [int(r["id"]) for r in self.conn.execute(
+            "SELECT id FROM analysis_runs WHERE session_id = ? "
+            "ORDER BY id DESC LIMIT -1 OFFSET ?", (session_id, keep))]
+        if not stale:
+            return 0
+        marks = ",".join("?" * len(stale))
+        cur = self.conn.cursor()
+        cur.execute(f"DELETE FROM endpoint_params WHERE endpoint_id IN "  # noqa: S608
+                    f"(SELECT id FROM endpoints WHERE run_id IN ({marks}))", stale)
+        cur.execute(f"DELETE FROM schema_fields WHERE schema_id IN "      # noqa: S608
+                    f"(SELECT id FROM schemas WHERE run_id IN ({marks}))", stale)
+        cur.execute(f"DELETE FROM selectors WHERE element_id IN "         # noqa: S608
+                    f"(SELECT id FROM ui_elements WHERE run_id IN ({marks}))", stale)
+        for table in ("events", "endpoints", "schemas", "dependencies",
+                      "ui_elements", "states", "state_transitions",
+                      "workflow_steps", "technologies", "findings"):
+            cur.execute(f"DELETE FROM {table} WHERE run_id IN ({marks})", stale)  # noqa: S608
+        cur.execute(f"DELETE FROM analysis_runs WHERE id IN ({marks})", stale)  # noqa: S608
+        return len(stale)
+
+    def write(self, result: AnalysisResult, *, keep: int = 1) -> int:
+        """Persist one analysis run, superseding older ones for this session.
+
+        `keep=1` is the contract: nothing reads an older run -- both readers
+        select the newest at the current ANALYSIS_VERSION -- and a retained one
+        is a claim about the past that nothing verifies, since the log it was
+        derived from may since have grown.
+        """
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT INTO analysis_runs (session_id, created_at, analysis_version, event_count) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO analysis_runs (session_id, created_at, analysis_version,"
+            " event_count, log_size, log_sha256) VALUES (?, ?, ?, ?, ?, ?)",
             (result.session_id, datetime.now(UTC).isoformat(),
-             result.analysis_version, result.event_count),
+             result.analysis_version, result.event_count,
+             result.log_size, result.log_sha256),
         )
         run_id = int(cur.lastrowid or 0)
+
+        # The evidence index. executemany because this is the one table whose
+        # row count tracks the log rather than the derived knowledge -- tens of
+        # thousands of rows on a long session.
+        cur.executemany(
+            "INSERT INTO events (run_id, event_id, seq, type, source, t_wall, t_mono,"
+            " page_id, frame_id, byte_offset, byte_length)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [(run_id, row.event_id, row.seq, row.type, row.source, row.t_wall,
+              row.t_mono, row.page_id, row.frame_id, row.byte_offset, row.byte_length)
+             for row in result.event_index],
+        )
 
         for endpoint in result.endpoints:
             cur.execute(
@@ -307,10 +486,23 @@ class DerivedStore:
         for transition in result.transitions:
             cur.execute(
                 "INSERT INTO state_transitions (run_id, from_state, to_state, trigger,"
-                " observation_count, evidence_ids) VALUES (?,?,?,?,?,?)",
+                " trigger_type, trigger_element_key, trigger_event_id,"
+                " observation_count, evidence_ids) VALUES (?,?,?,?,?,?,?,?,?)",
                 (run_id, transition.from_state, transition.to_state, transition.trigger,
+                 transition.trigger_type, transition.trigger_element_key,
+                 transition.trigger_event_id,
                  transition.observation_count, _dumps(transition.evidence.event_ids)),
             )
+
+        cur.executemany(
+            "INSERT INTO workflow_steps (run_id, ordinal, seq, kind, element_key,"
+            " url_pattern, repeat_count, value_recorded, key, evidence_ids)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(run_id, step.ordinal, step.seq, step.kind, step.element_key,
+              step.url_pattern, step.repeat_count, int(step.value_recorded),
+              step.key, _dumps(step.evidence.event_ids))
+             for step in result.workflow],
+        )
 
         for tech in result.technologies:
             cur.execute(
@@ -328,6 +520,7 @@ class DerivedStore:
                  _dumps(finding.evidence.event_ids)),
             )
 
+        self.replaced = self._prune(result.session_id, keep)
         self.conn.commit()
         return run_id
 
@@ -356,9 +549,14 @@ class DerivedStore:
 # of interpolated from caller input.
 ALLOWED_TABLES = frozenset({
     "endpoints", "schemas", "dependencies", "ui_elements",
-    "states", "state_transitions", "technologies", "findings",
+    "states", "state_transitions", "workflow_steps", "technologies", "findings",
 })
 ALLOWED_CHILD_TABLES = frozenset({"endpoint_params", "schema_fields", "selectors"})
 ALLOWED_FKS = frozenset({"endpoint_id", "schema_id", "element_id"})
 
-__all__ = ["ANALYSIS_VERSION", "DerivedStore"]
+__all__ = [
+    "ANALYSIS_VERSION",
+    "STORE_SCHEMA_VERSION",
+    "DerivedStore",
+    "StoreSchemaError",
+]

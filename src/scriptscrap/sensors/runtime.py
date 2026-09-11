@@ -16,9 +16,7 @@ them with network events; that is M3's job over the recorded log.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 from ..events import EventType, Source
 from ..probe import (
@@ -26,18 +24,30 @@ from ..probe import (
     DRAIN_FUNCTION,
     PATCH_MARKER,
     build_init_script,
+    build_isolated_reinstall_script,
     build_main_world_script,
 )
 from .identity import PageRegistry
+from .scope import (
+    REDUCED_KEEP_KEYS,
+    URL_PAYLOAD_KEYS,
+    redact_stack_frame,
+    strip_query,
+)
 
 # Probe record type -> spine event type. A record whose type is not here is
 # recorded as a sensor error rather than silently dropped.
 PROBE_EVENT_TYPES: dict[str, EventType] = {
     "user_click": EventType.USER_CLICK,
+    "user_dblclick": EventType.USER_DBLCLICK,
+    "user_rightclick": EventType.USER_RIGHTCLICK,
     "user_input": EventType.USER_INPUT,
     "user_change": EventType.USER_CHANGE,
     "user_submit": EventType.USER_SUBMIT,
     "user_key": EventType.USER_KEY,
+    "user_hover": EventType.USER_HOVER,
+    "user_drag": EventType.USER_DRAG,
+    "user_scroll": EventType.USER_SCROLL,
     "runtime_fetch": EventType.RUNTIME_FETCH,
     "runtime_xhr": EventType.RUNTIME_XHR,
     "runtime_beacon": EventType.RUNTIME_BEACON,
@@ -63,54 +73,14 @@ PROBE_EVENT_TYPES: dict[str, EventType] = {
 # The same policy as the Playwright path applies here: out of scope means
 # metadata only.
 
-# Payload keys that hold a URL. Any of them is stripped of query and fragment
-# when its own host is out of scope, wherever it appears.
-URL_PAYLOAD_KEYS = ("url", "action", "from", "frame_url")
+# The reduction itself lives in `scope.py`: the lifecycle sensor needs the same
+# policy, and a boundary rule that exists in only one sensor is a boundary rule
+# with a hole in it.
 
-# Everything a reduced (out-of-scope) event may keep. An allowlist, because a
-# denylist silently admits every payload key added later.
-REDUCED_KEEP_KEYS = frozenset({
-    "method", "status", "via", "op", "store", "async", "count", "overflow",
-    "probe_ordinal", "probe_world", "probe_time_ms", "probe_time_origin",
-    "is_top_frame",
-})
-
-# A URL inside a stack frame, e.g. `handler@https://host/app.js?v=3:12:5`.
-_STACK_URL = re.compile(r"https?://[^\s)]+")
-
-
-def _strip_query(url: str) -> str:
-    """`https://h/p?a=secret#frag` -> `https://h/p`. Origin and path survive."""
-    parsed = urlsplit(url)
-    if not parsed.scheme and not parsed.netloc:
-        return url.split("?", 1)[0].split("#", 1)[0]
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-
-
-def _redact_stack_frame(scope: Any, frame: Any) -> Any:
-    """Strip query values from any out-of-scope script URL inside a stack frame.
-
-    A stack is the evidence for WHICH code made a call, and that is worth
-    keeping. The parameters on a third-party script's URL are not.
-    """
-    if not isinstance(frame, str):
-        return frame
-
-    def replace(match: re.Match) -> str:
-        # A frame is `...url:line:column`; the trailing position is not part of
-        # the URL and must survive the strip.
-        raw = match.group(0)
-        position = ""
-        while raw and raw[-1].isdigit():
-            head, _, tail = raw.rpartition(":")
-            if not head or not tail.isdigit():
-                break
-            position = ":" + tail + position
-            raw = head
-        return (raw if scope.contains(raw) else _strip_query(raw)) + position
-
-    return _STACK_URL.sub(replace, frame)
-
+# Payload keys that would collide with EventLog.emit()/emit_event()'s own
+# parameters. A probe record carrying one is renamed rather than lost.
+_RESERVED_PAYLOAD_KEYS = frozenset({"source", "type", "page_id", "frame_id",
+                                    "event_type"})
 
 DEFAULT_PROBE_CONFIG = {
     "maxBuffer": 500,
@@ -201,6 +171,23 @@ class RuntimeSensor:
                 )
         return marker if isinstance(marker, dict) else None
 
+    async def rearm_isolated(self, frame: Any) -> bool:
+        """Re-attach the isolated-world listeners in a frame's live document.
+
+        For a popup or a new tab, Camoufox's context-level init script defines
+        the probe's globals but its listeners never fire (verified: a manual
+        isolated listener catches a fill there, the probe's own does not).
+        Re-evaluating the isolated probe into the live document attaches working
+        listeners. Idempotent per document -- each navigation is a fresh
+        document, so exactly one probe attaches. Best effort: a frame that has
+        already navigated away is not worth a sensor error.
+        """
+        try:
+            await frame.evaluate(build_isolated_reinstall_script(self.config))
+            return True
+        except Exception:
+            return False
+
     async def verify_main_world(self, frame: Any) -> dict[str, Any]:
         """Read the patch marker back from the page. The runtime self-test.
 
@@ -279,6 +266,14 @@ class RuntimeSensor:
 
         payload = self._apply_scope(payload)
 
+        # A payload key that collides with emit_event's own parameters would
+        # raise "multiple values for argument" and lose the whole record. The
+        # probe's payload comes from JavaScript, so this is defended
+        # structurally rather than by convention -- the same guard the
+        # extension sensor applies.
+        for reserved in _RESERVED_PAYLOAD_KEYS & payload.keys():
+            payload[f"probe_{reserved}"] = payload.pop(reserved)
+
         self.received += 1
         self.engine.emit_event(
             Source.RUNTIME, event_type, page_id=page_id, frame_id=frame_id, **payload
@@ -310,11 +305,11 @@ class RuntimeSensor:
         for key in URL_PAYLOAD_KEYS:
             value = payload.get(key)
             if isinstance(value, str) and value and not scope.contains(value):
-                payload[key] = _strip_query(value)
+                payload[key] = strip_query(value)
 
         stack = payload.get("stack")
         if isinstance(stack, list):
-            payload["stack"] = [_redact_stack_frame(scope, f) for f in stack]
+            payload["stack"] = [redact_stack_frame(scope, f) for f in stack]
 
         subject = (payload.get("url") or payload.get("action")
                    or payload.get("frame_url"))
@@ -332,7 +327,7 @@ class RuntimeSensor:
                 # was keeping the full in-scope `from` URL beside it. The
                 # in-scope side of that navigation is recorded on the in-scope
                 # path anyway, so nothing is actually lost here.
-                reduced[key] = _strip_query(value)
+                reduced[key] = strip_query(value)
         removed = sorted(k for k in payload if k not in reduced)
         reduced["scope"] = "out_of_scope"
         reduced["evidence_reduced"] = True

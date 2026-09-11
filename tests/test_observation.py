@@ -28,7 +28,8 @@ async def _run(tmp_path):
 
     with FixtureServer() as fx:
         scope = inv.InvestigationScope(fx.base_url)
-        engine = inv.WebHarvester(fx.base_url, scope, session_id="sess-20260101-000000")
+        engine = inv.WebHarvester(fx.base_url, scope,
+                                  session_id="sess-20260101-000000", output_dir=out)
         engine.record_launch_options({"headless": True})
 
         async with AsyncCamoufox(
@@ -83,12 +84,68 @@ async def _run(tmp_path):
             await page.click("#btn-route")
             await page.wait_for_timeout(600)
 
+            # -- semantic actions -------------------------------------
+            # A double-click and a right-click are distinct intents, not clicks.
+            await page.dblclick("#btn-icon")
+            await page.click("#btn-icon", button="right")
+            # The click lands on a decorative child; the observer must normalise
+            # up to the actionable button and keep the original target.
+            await page.click("#btn-icon .btn-icon-label")
+
+            # A custom ARIA combobox: open it, then choose an option. There is
+            # no native <select> value here -- only accessible state.
+            await page.click("#agent-combo")
+            await page.click("#opt-agent-2")
+
+            # File selection: names and sizes are observed, never content.
+            upload = tmp_path / "justificatif.txt"
+            upload.write_text("fixture upload body", encoding="utf-8")
+            await page.set_input_files("#justificatif", str(upload))
+            await page.wait_for_timeout(200)
+
+            # Populate IndexedDB and Cache Storage so the inventory has
+            # something to find. Done from the driver rather than the fixture
+            # so the golden page is untouched.
+            await page.evaluate("""async () => {
+                await new Promise((resolve, reject) => {
+                    const req = indexedDB.open('fixture-idb', 1);
+                    req.onupgradeneeded = () =>
+                        req.result.createObjectStore('rows', { keyPath: 'id' });
+                    req.onsuccess = () => {
+                        const db = req.result;
+                        const tx = db.transaction('rows', 'readwrite');
+                        tx.objectStore('rows').put({ id: 1, v: 'fixture' });
+                        tx.oncomplete = () => { db.close(); resolve(); };
+                    };
+                    req.onerror = () => reject(req.error);
+                });
+                if (typeof caches !== 'undefined') {
+                    const cache = await caches.open('fixture-cache-v1');
+                    await cache.put('/cached-resource',
+                                    new Response('cached body'));
+                }
+            }""")
+
             await engine.storage_sensor.snapshot(page, reason="mid_session")
 
             # -- navigation survival ----------------------------------
             # Everything above must already be on disk once we navigate away.
             await page.click("#btn-submit")
             await page.wait_for_load_state("load")
+
+            # -- tables: sort, filter, paginate, row action -----------
+            await page.goto(fx.base_url + "/table-demo", wait_until="load")
+            await page.wait_for_selector("html[data-fixture-table-ready='true']",
+                                         state="attached")
+            await page.click("#col-client")                       # sort a column
+            await page.fill("#table-filter", "alpha")             # filter
+            await page.click(".row-edit[data-id='D-1001']")       # row action
+            await page.click("#next-page")                        # paginate
+            await page.wait_for_timeout(150)
+
+            # A heartbeat recovery point, as the background scanner emits during
+            # a long session.
+            engine.checkpoint(reason="test")
 
             await engine.extract_active_introspection(page)
 
@@ -182,6 +239,66 @@ def test_form_submission_is_observed_before_navigation(log):
     assert pw_field["value"]["redacted"] is True
 
 
+# --- semantic actions (agency upgrade) ----------------------------------
+
+def test_double_click_and_right_click_are_distinct_actions(log):
+    assert log.of_type(EventType.USER_DBLCLICK), "no user_dblclick observed"
+    right = _payloads(log, EventType.USER_RIGHTCLICK)
+    assert right, "no user_rightclick observed"
+    assert any((r.get("element") or {}).get("id") == "btn-icon" for r in right)
+
+
+def test_a_click_on_a_decorative_child_normalises_to_the_actionable_button(log):
+    """The click landed on the inner <span>; the observed target is the button,
+    with the original target kept beside it as evidence."""
+    normalised = [
+        p for p in _payloads(log, EventType.USER_CLICK)
+        if (p.get("element") or {}).get("id") == "btn-icon" and "original_target" in p
+    ]
+    assert normalised, "a child click was not normalised to #btn-icon"
+    original = normalised[0]["original_target"]
+    assert original["tag"] in ("span", "svg", "path")
+
+
+def test_the_testid_is_captured_on_the_actionable_element(log):
+    hits = [p for p in _payloads(log, EventType.USER_CLICK)
+            + _payloads(log, EventType.USER_DBLCLICK) + _payloads(log, EventType.USER_RIGHTCLICK)
+            if (p.get("element") or {}).get("id") == "btn-icon"]
+    assert hits
+    assert any((h["element"].get("dataset") or {}).get("testid") == "icon-action"
+               for h in hits), "data-testid was not captured"
+
+
+def test_a_custom_aria_combobox_state_is_captured(log):
+    """No native value -- only accessible state. The trigger must carry the
+    listbox it controls, so offline analysis can connect them."""
+    clicks = _payloads(log, EventType.USER_CLICK)
+    combo = next((c for c in clicks
+                  if (c.get("element") or {}).get("id") == "agent-combo"), None)
+    assert combo is not None, "the combobox trigger was not observed"
+    aria = combo["element"].get("aria") or {}
+    assert aria.get("aria-controls") == "agent-list"
+    assert aria.get("aria-haspopup") == "listbox"
+    assert "aria-expanded" in aria
+    # The option the operator chose is itself an actionable role=option.
+    option = next((c for c in clicks
+                   if (c.get("element") or {}).get("id") == "opt-agent-2"), None)
+    assert option is not None, "the chosen option was not observed"
+    assert option["element"].get("role") == "option"
+
+
+def test_file_selection_captures_names_and_sizes_never_content(log):
+    events = _payloads(log, EventType.USER_INPUT) + _payloads(log, EventType.USER_CHANGE)
+    picked = [e for e in events if (e.get("element") or {}).get("id") == "justificatif"]
+    assert picked, "the file input interaction was not observed"
+    value = picked[0]["value"]
+    assert value["count"] == 1
+    assert value["files"][0]["name"] == "justificatif.txt"
+    assert value["files"][0]["size"] > 0
+    # The file body must never appear anywhere in the event.
+    assert "fixture upload body" not in str(picked[0])
+
+
 # --- M2.3 runtime causality --------------------------------------------
 
 def test_runtime_fetch_is_observed_with_a_stack(log):
@@ -223,29 +340,32 @@ def test_runtime_call_and_network_request_share_a_join_key(log):
 def test_probe_ordinals_are_monotonic_within_a_frame_and_world(log):
     """In-page ordering is recoverable even though ingest order is not.
 
-    The scope of that guarantee is one frame in one JS WORLD. The probe runs in
-    two -- listeners in the isolated world, patched instruments in the page's
-    own -- and each counts its own ordinals. Comparing them across worlds is
-    the same mistake as comparing `seq` across sensors, so the join key
-    includes `probe_world`.
+    The scope of that guarantee is one frame in one JS WORLD in one DOCUMENT:
+    an ordinal restarts on navigation (it counts from the document's
+    navigation-start epoch), while a frame id survives navigation. So the join
+    key includes `probe_world` AND the document's `probe_time_origin` -- a frame
+    that navigates twice legitimately shows two ascending runs, one per
+    document, and comparing across them is the same mistake as comparing `seq`
+    across sensors.
     """
-    by_frame_world: dict[tuple[str, str], list[int]] = {}
+    by_key: dict[tuple, list[int]] = {}
     worlds: set[str] = set()
     for event in log:
         if event.source is Source.RUNTIME and event.payload.get("probe_ordinal"):
             world = event.payload.get("probe_world") or "isolated"
             worlds.add(world)
-            by_frame_world.setdefault(
-                (event.frame_id or "?", world), []
+            origin = event.payload.get("probe_time_origin")
+            by_key.setdefault(
+                (event.frame_id or "?", world, origin), []
             ).append(event.payload["probe_ordinal"])
 
-    assert by_frame_world, "no probe events carried an ordinal"
+    assert by_key, "no probe events carried an ordinal"
     assert worlds == {"isolated", "main"}, (
         f"expected evidence from both probe roles, got {sorted(worlds)}. "
         "A missing 'main' means the patched instruments never reached the page.")
-    for (frame_id, world), ordinals in by_frame_world.items():
+    for (frame_id, world, origin), ordinals in by_key.items():
         assert ordinals == sorted(ordinals), (
-            f"probe ordinals out of order in {frame_id} / {world} world")
+            f"probe ordinals out of order in {frame_id} / {world} world / doc {origin}")
 
 
 def test_history_api_is_observed(log):
@@ -355,6 +475,33 @@ def test_storage_snapshot_includes_cookies_and_web_storage(log):
     assert any(c["name"] == "fixture_session" for c in latest["cookies"])
 
 
+def test_indexed_db_is_inventoried_not_just_reported_missing(log):
+    """Database and object-store names with record counts -- what Firefox can
+    actually give -- rather than a blanket 'not captured'."""
+    snapshots = _payloads(log, EventType.STORAGE_SNAPSHOT)
+    inventoried = [s for s in snapshots
+                   if (s.get("indexed_db") or {}).get("databases")]
+    assert inventoried, "IndexedDB was never inventoried"
+    dbs = inventoried[-1]["indexed_db"]["databases"]
+    fixture_db = next((d for d in dbs if d["name"] == "fixture-idb"), None)
+    assert fixture_db is not None, [d["name"] for d in dbs]
+    rows = next(s for s in fixture_db["stores"] if s["name"] == "rows")
+    assert rows["count"] == 1
+    # The narrower, honest gap: names and counts captured, values not read.
+    reasons = {g.payload["reason"] for g in log.of_type(EventType.CAPTURE_GAP)}
+    assert "indexed_db_values_not_captured" in reasons
+    assert "indexed_db_not_captured" not in reasons
+
+
+def test_cache_storage_is_inventoried(log):
+    snapshots = _payloads(log, EventType.STORAGE_SNAPSHOT)
+    inventoried = [s for s in snapshots
+                   if (s.get("cache_storage") or {}).get("caches")]
+    assert inventoried, "Cache Storage was never inventoried"
+    caches = inventoried[-1]["cache_storage"]["caches"]
+    assert any(c["name"] == "fixture-cache-v1" for c in caches)
+
+
 def test_dom_mutations_are_emitted_as_bounded_batches(log):
     batches = _payloads(log, EventType.DOM_MUTATION)
     assert batches, "no dom_mutation events"
@@ -370,6 +517,46 @@ def test_failed_request_url_is_the_dead_port(log):
 
 
 # --- capture honesty -----------------------------------------------------
+
+def test_table_context_is_captured_on_interaction(log):
+    """A click inside a table carries the table's identity, columns and the
+    row's cells, so the table can be reconstructed offline."""
+    with_table = [p for p in _payloads(log, EventType.USER_CLICK) if p.get("table")]
+    assert with_table, "no interaction carried table context"
+    edit = next((p for p in with_table
+                 if (p.get("element") or {}).get("text") == "Editer"), None)
+    assert edit is not None, "the row action was not captured with its table"
+    table = edit["table"]
+    assert table["table_id"] == "dossiers"
+    assert "Client" in table["columns"]
+    assert "Alpha" in table["cells"]
+    assert table["row_id"] == "D-1001"
+
+
+def test_the_table_catalog_reconstructs_the_worked_table(log):
+    from scriptscrap.analysis import analyze_events
+
+    result = analyze_events(list(log), "s")
+    table = next((t for t in result.tables if t.table_id == "dossiers"), None)
+    assert table is not None, "the worked table was not catalogued"
+    assert table.caption == "Dossiers ouverts"
+    assert "Client" in table.columns
+    assert any(r["cells"][1] == "Alpha" for r in table.rows)
+    assert "Editer" in table.row_actions
+    assert table.operations.get("sort", 0) >= 1
+    assert table.operations.get("filter", 0) >= 1
+    assert table.operations.get("paginate", 0) >= 1
+
+
+def test_a_checkpoint_records_progress_for_a_long_session(log):
+    """A heartbeat so an interrupted capture shows how far it got."""
+    checkpoints = _payloads(log, EventType.CHECKPOINT)
+    assert checkpoints, "no checkpoint event was written"
+    latest = checkpoints[-1]
+    assert latest["events_so_far"] > 0
+    assert "elapsed_seconds" in latest
+    assert "pages_open" in latest
+
 
 def test_sensor_stats_are_recorded(log):
     end = log.of_type(EventType.SESSION_END)

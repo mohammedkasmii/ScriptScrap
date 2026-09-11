@@ -20,7 +20,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Bumped when inference logic changes in a way that invalidates stored results.
-ANALYSIS_VERSION = 1
+# 2: the derived store gained an events index (envelope + byte offset) and the
+#    run gained the log fingerprint those offsets are only valid against.
+# 3: the derived model gained an ordered workflow and a machine-readable link
+#    from a state transition to the element that triggered it.
+# 4: analysis surfaces the log's own integrity problems as findings
+#    (duplicate_event_id, log_integrity), which EventLogReader.validate had
+#    detected since M1 with nothing acting on them.
+ANALYSIS_VERSION = 4
 
 
 @dataclass(slots=True)
@@ -158,6 +165,10 @@ class LocatorCandidate:
     resolved_count: int
     sample_count: int
     warning: str | None = None
+    # The fixed constant behind `warning`. `warning` interpolates a framework
+    # name or a count ("value changed across observations (3 distinct)") and is
+    # therefore not exportable; this is.
+    warning_code: str | None = None      # "framework_generated" | "value_varied"
 
     @property
     def stability(self) -> float:
@@ -188,8 +199,12 @@ class UIElement:
         """
         if not self.locators:
             return None
-        order = {"role_name": 0, "label": 1, "name": 2, "text": 3,
-                 "id": 4, "css": 5, "structural": 6, "xpath": 7}
+        # The ranking the mission asks for: a test id first, then computed role
+        # plus accessible name, then label, placeholder, name, a stable id,
+        # stable CSS, and finally a structural fallback.
+        order = {"test_id": 0, "role_name": 1, "label": 2, "placeholder": 3,
+                 "name": 4, "text": 5, "id": 6, "css": 7, "structural": 8,
+                 "xpath": 9}
         usable = [loc for loc in self.locators if not loc.warning]
         pool = usable or self.locators
         return sorted(pool, key=lambda locator: (-locator.stability,
@@ -212,8 +227,67 @@ class AppState:
 class StateTransition:
     from_state: str
     to_state: str
+    # A human-readable label: f"{type} #{element id/label/text}". It carries
+    # page content, so it is for the local report and the workspace, and the
+    # shared export drops it. The three fields below are the machine-readable
+    # halves that survive.
     trigger: str
     observation_count: int
+    # The bare EventType that caused the move -- "user_click",
+    # "runtime_history" -- with no element name attached. A fixed constant, so
+    # it is exportable and a reader still learns what kind of thing moved the
+    # application.
+    trigger_type: str | None = None
+    # The element the trigger event happened on, as a semantic key that joins
+    # to UIElement.key. `trigger` is a label and is NOT an identity: a
+    # generator that joined on it matched nothing.
+    trigger_element_key: str | None = None
+    trigger_event_id: str | None = None
+    evidence: Evidence = field(default_factory=Evidence)
+
+
+WORKFLOW_KINDS = ("navigate", "click", "double_click", "right_click", "fill",
+                  "select", "check", "press", "submit")
+
+# Keys that may be reproduced in a generated script. Navigation and control
+# only: a keystroke is application-visible input and can be one character of a
+# password, so the default is that it does not leave.
+SAFE_KEYS = frozenset({
+    "Enter", "Tab", "Escape", "Backspace", "Delete",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "Home", "End", "PageUp", "PageDown",
+})
+
+
+@dataclass(slots=True, frozen=True)
+class WorkflowStep:
+    """One thing the operator did, in the order it happened.
+
+    Deliberately NOT reconstructed by the generator. Order lives in `seq`,
+    which the derived model does not otherwise carry, and reconstructing it
+    from `AnalysisResult`'s frequency-sorted lists produced a script that
+    replayed the session in observation-count order.
+
+    `value_recorded` says a value was typed. It never says WHICH: the capture
+    records that an input event happened on an element, not its content, and
+    a generated `.fill("Alice")` would be an invention. It is always False on a
+    `press` step -- a keystroke is not a missing value.
+
+    `key` is set only when the capture recorded one AND it is in `SAFE_KEYS`.
+    An unrecorded or non-allowlisted key stays None and the generator emits a
+    TODO rather than substituting one: the session did not observe an Enter
+    press, and writing one would put behaviour in the script that never
+    happened.
+    """
+
+    ordinal: int
+    seq: int
+    kind: str
+    element_key: str | None = None
+    url_pattern: str | None = None
+    repeat_count: int = 1
+    value_recorded: bool = False
+    key: str | None = None
     evidence: Evidence = field(default_factory=Evidence)
 
 
@@ -223,6 +297,11 @@ class Technology:
     category: str
     confidence: float
     signals: list[str] = field(default_factory=list)
+    # How many signals, not which. `signals` is built from
+    # `sorted(webforms_state | webforms_ops)` and `sorted(graphql_ops)` --
+    # field and operation names read off the application -- so the list itself
+    # cannot leave the machine, and the count is what survives export.
+    signal_count: int = 0
     evidence: Evidence = field(default_factory=Evidence)
 
 
@@ -235,6 +314,27 @@ class Finding:
     message: str
     count: int = 1
     evidence: Evidence = field(default_factory=Evidence)
+
+
+@dataclass(slots=True, frozen=True)
+class EventIndexRow:
+    """One event's envelope, plus where its line lives in the log.
+
+    Deliberately no payload field. This row exists so evidence can be found,
+    not so it can be stored somewhere else -- `events.jsonl` remains the only
+    place an event's content lives.
+    """
+
+    event_id: str
+    seq: int
+    type: str
+    source: str
+    t_wall: str
+    t_mono: float
+    page_id: str | None
+    frame_id: str | None
+    byte_offset: int
+    byte_length: int
 
 
 @dataclass(slots=True)
@@ -250,10 +350,41 @@ class AnalysisResult:
     ui_elements: list[UIElement] = field(default_factory=list)
     states: list[AppState] = field(default_factory=list)
     transitions: list[StateTransition] = field(default_factory=list)
+    # The observed workflow, in `seq` order. Empty when no user action and no
+    # navigation was recorded.
+    workflow: list[WorkflowStep] = field(default_factory=list)
     technologies: list[Technology] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     # Forensic-era additions. Empty on a normal session, which is what keeps
     # analysis working without the extension.
     activities: list[Any] = field(default_factory=list)
+    # Automatically inferred business activities: a long session split into
+    # probable tasks from idle gaps, form submissions and route structure.
+    # An interpretation over the timeline, never a rewrite of it -- the ordered
+    # workflow and event log stay intact beside this. Empty when no user action
+    # was recorded.
+    segments: list[Any] = field(default_factory=list)
+    # A catalog of the forms the operator used: their controls, final values,
+    # option choices, the submit and the request/outcome it produced. Empty
+    # when no form was touched.
+    forms: list[Any] = field(default_factory=list)
+    # A catalog of the tables the operator worked: identity, columns, the rows
+    # observed, row actions, and the sort/filter/paginate operations performed.
+    # Empty when no table was interacted with.
+    tables: list[Any] = field(default_factory=list)
     health: dict[str, Any] | None = None
     scripts: list[dict[str, Any]] = field(default_factory=list)
+    # Credential-bearing header NAMES the application sent, and how often.
+    # Names only -- the capture never records their values. This is what lets a
+    # generated client say "this API needs a Cookie header, supply it from the
+    # environment" without ever having held the operator's session.
+    auth_headers: dict[str, int] = field(default_factory=dict)
+    # The evidence index. One entry per event: the envelope plus where its line
+    # lives in events.jsonl, so a conclusion can be walked back to its raw
+    # evidence with a seek rather than a re-parse of the whole log. Empty when
+    # the result was derived from events already in memory rather than a file.
+    event_index: list[EventIndexRow] = field(default_factory=list)
+    # The log those offsets were built from. An offset means nothing without
+    # them, so they travel together.
+    log_size: int | None = None
+    log_sha256: str | None = None
