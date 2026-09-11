@@ -38,6 +38,8 @@ from .scope import (
 # recorded as a sensor error rather than silently dropped.
 PROBE_EVENT_TYPES: dict[str, EventType] = {
     "user_click": EventType.USER_CLICK,
+    "user_dblclick": EventType.USER_DBLCLICK,
+    "user_rightclick": EventType.USER_RIGHTCLICK,
     "user_input": EventType.USER_INPUT,
     "user_change": EventType.USER_CHANGE,
     "user_submit": EventType.USER_SUBMIT,

@@ -392,6 +392,10 @@ def _action_call(step) -> str | None:
     if step.kind == "select":
         return (f".select_option({py_str('')})  # the chosen option was not "
                 "recorded; supply one")
+    if step.kind == "double_click":
+        return ".dblclick()"
+    if step.kind == "right_click":
+        return '.click(button="right")'
     if step.kind == "check":
         return ".check()  # observed toggled; check() sets rather than toggles"
     if step.kind == "press":

@@ -22,7 +22,8 @@ from ..events import Event, EventType
 from .models import Evidence, LocatorCandidate, UIElement
 
 USER_ACTION_TYPES = (
-    EventType.USER_CLICK, EventType.USER_INPUT,
+    EventType.USER_CLICK, EventType.USER_DBLCLICK, EventType.USER_RIGHTCLICK,
+    EventType.USER_INPUT,
     EventType.USER_CHANGE, EventType.USER_SUBMIT, EventType.USER_KEY,
 )
 

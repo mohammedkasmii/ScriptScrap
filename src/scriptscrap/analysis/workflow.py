@@ -25,7 +25,8 @@ from .states import route_shape
 NAVIGATION_TYPES = (EventType.NAVIGATION_COMMITTED, EventType.RUNTIME_HISTORY)
 
 ACTION_TYPES = (
-    EventType.USER_CLICK, EventType.USER_INPUT, EventType.USER_CHANGE,
+    EventType.USER_CLICK, EventType.USER_DBLCLICK, EventType.USER_RIGHTCLICK,
+    EventType.USER_INPUT, EventType.USER_CHANGE,
     EventType.USER_SUBMIT, EventType.USER_KEY, EventType.RUNTIME_FORM_SUBMIT,
 )
 
@@ -49,6 +50,10 @@ def _kind(event: Event, element: dict) -> str:
     """The action, from the event type and what it was performed on."""
     if event.type in (EventType.USER_SUBMIT, EventType.RUNTIME_FORM_SUBMIT):
         return "submit"
+    if event.type is EventType.USER_DBLCLICK:
+        return "double_click"
+    if event.type is EventType.USER_RIGHTCLICK:
+        return "right_click"
     if event.type is EventType.USER_KEY:
         return "press"
     input_type = str(element.get("type") or "").lower()

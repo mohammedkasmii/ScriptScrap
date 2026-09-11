@@ -470,6 +470,11 @@ window.recalculerFixture = recalculerFixture;
     byId("btn-etat-resume").addEventListener("click", allerResume);
     rendreBoutonInstable();
 
+    byId("btn-icon").addEventListener("click", function () {
+      setResultat("icone");
+    });
+    initialiserCombobox();
+
     attacherShadow();
     enregistrerHandlersJQuery();
     peuplerGarages();
@@ -642,6 +647,32 @@ window.recalculerFixture = recalculerFixture;
     hote.appendChild(bouton);
   }
 
+  function initialiserCombobox() {
+    var combo = byId("agent-combo");
+    var list = byId("agent-list");
+    if (!combo || !list) {
+      return;
+    }
+    combo.addEventListener("click", function () {
+      var open = combo.getAttribute("aria-expanded") === "true";
+      combo.setAttribute("aria-expanded", open ? "false" : "true");
+      list.hidden = open;
+    });
+    list.querySelectorAll('[role="option"]').forEach(function (option) {
+      option.addEventListener("click", function () {
+        list.querySelectorAll('[role="option"]').forEach(function (other) {
+          other.setAttribute("aria-selected", "false");
+        });
+        option.setAttribute("aria-selected", "true");
+        combo.setAttribute("aria-activedescendant", option.id);
+        combo.setAttribute("aria-expanded", "false");
+        combo.textContent = option.textContent;
+        list.hidden = true;
+        setResultat("agent=" + option.getAttribute("data-value"));
+      });
+    });
+  }
+
   function telecharger() {
     // A real navigation to an attachment response, so Playwright raises a
     // download event rather than a navigation.
@@ -716,8 +747,33 @@ MAIN_PAGE_HTML = """<!DOCTYPE html>
 
   <input type="password" id="pw" name="pw" value="">
 
+  <label for="justificatif">Justificatif</label>
+  <input type="file" id="justificatif" name="justificatif">
+
   <button type="submit" id="btn-submit">Envoyer</button>
 </form>
+
+<!-- A button whose click lands on a decorative child: the observer must
+     normalise the icon/span target up to the button. data-testid is the most
+     stable locator a page can offer, so one control carries it. -->
+<button type="button" id="btn-icon" data-testid="icon-action">
+  <svg viewBox="0 0 8 8" width="8" height="8"><path d="M0 0h8v8H0z"></path></svg>
+  <span class="btn-icon-label">Action icone</span>
+</button>
+
+<!-- A custom ARIA combobox: no native <select> value, only accessible state.
+     Offline analysis connects the trigger to the listbox it controls and to
+     the option the operator selects. -->
+<div id="combo-wrap">
+  <span id="combo-label">Agent</span>
+  <div id="agent-combo" role="combobox" aria-expanded="false"
+       aria-controls="agent-list" aria-haspopup="listbox"
+       aria-labelledby="combo-label" tabindex="0">Choisir un agent</div>
+  <ul id="agent-list" role="listbox" aria-labelledby="combo-label" hidden>
+    <li role="option" id="opt-agent-1" data-value="ag-1">Agent Un</li>
+    <li role="option" id="opt-agent-2" data-value="ag-2">Agent Deux</li>
+  </ul>
+</div>
 
 <div id="actions">
   <button type="button" id="btn-charger">Charger</button>

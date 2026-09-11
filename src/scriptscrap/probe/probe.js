@@ -335,14 +335,40 @@
     }
   }
 
+  // A click frequently lands on a decorative child -- an icon, an SVG path, a
+  // <b> inside a button. The actionable thing is the nearest ancestor that a
+  // person can operate, so normalise to it. Both are recorded when they differ,
+  // because the original target is evidence of exactly where the pointer went.
+  const ACTIONABLE = "a,button,input,select,textarea,option,label,summary," +
+    "[role],[contenteditable],[tabindex],[onclick]";
+
+  function actionableAncestor(el) {
+    try {
+      if (!el || el.nodeType !== 1 || !el.closest) return el;
+      const found = el.closest(ACTIONABLE);
+      return found || el;
+    } catch (e) {
+      return el;
+    }
+  }
+
+  // Accessible-state and relationship attributes a custom control uses instead
+  // of native state -- an ARIA combobox is `aria-expanded` on a <div>, not an
+  // <input> with a real value. Kept verbatim so offline analysis can connect a
+  // trigger to the listbox it controls and the option the operator chose.
+  const ARIA_STATE = ["aria-expanded", "aria-controls", "aria-selected",
+    "aria-checked", "aria-activedescendant", "aria-haspopup", "aria-pressed",
+    "aria-current", "aria-disabled"];
+
   function fingerprint(el) {
     if (!el || el.nodeType !== 1) return null;
     const tag = el.tagName.toLowerCase();
+    const type = el.getAttribute ? el.getAttribute("type") : null;
     const fp = {
       tag: tag,
       id: el.id || null,
       name: el.getAttribute ? el.getAttribute("name") : null,
-      type: el.getAttribute ? el.getAttribute("type") : null,
+      type: type,
       role: el.getAttribute ? el.getAttribute("role") : null,
       class: el.getAttribute ? clip(el.getAttribute("class")) : null,
       placeholder: el.getAttribute ? el.getAttribute("placeholder") : null,
@@ -352,6 +378,24 @@
       readonly: !!el.readOnly,
       required: !!el.required,
     };
+    try {
+      // Control state, so a checkbox/radio/option/expander carries what it was
+      // in at the moment it was used.
+      const t = (type || "").toLowerCase();
+      if ((t === "checkbox" || t === "radio") && typeof el.checked === "boolean") {
+        fp.checked = el.checked;
+      }
+      if (tag === "option") fp.selected = !!el.selected;
+      if (tag === "select" && el.multiple) fp.multiple = true;
+      const aria = {};
+      if (el.getAttribute) {
+        for (const attr of ARIA_STATE) {
+          const value = el.getAttribute(attr);
+          if (value !== null) aria[attr] = clip(value);
+        }
+      }
+      if (Object.keys(aria).length) fp.aria = aria;
+    } catch (e) { /* ignore */ }
     try {
       const text = (el.innerText || el.textContent || "").trim();
       if (text) fp.text = clip(text.slice(0, 120));
@@ -381,6 +425,14 @@
       if (el.type === "checkbox" || el.type === "radio") {
         return { checked: !!el.checked, value: clip(el.value) };
       }
+      if (el.type === "file") {
+        // File NAMES and sizes only. Content never enters the capture from
+        // here; this is the metadata that says which files were chosen.
+        const files = el.files ? Array.prototype.map.call(el.files, (f) => ({
+          name: clip(f.name), size: f.size, type: f.type || null,
+        })) : [];
+        return { files: files, count: files.length };
+      }
       if (el.tagName === "SELECT") {
         const opts = Array.prototype.filter.call(el.selectedOptions || [], () => true);
         return {
@@ -395,15 +447,24 @@
 
   // --- user actions ------------------------------------------------------
 
+  const CLICK_TYPES = { user_click: 1, user_dblclick: 1, user_rightclick: 1 };
+
   function onUserEvent(type, ev) {
     guard("user_event", () => {
-      const el = ev.target;
-      if (!el || el.nodeType !== 1) return;
+      const raw = ev.target;
+      if (!raw || raw.nodeType !== 1) return;
+      // For a click, resolve to the nearest actionable ancestor; the raw target
+      // is kept beside it when they differ, as evidence of where the pointer
+      // actually landed.
+      const el = CLICK_TYPES[type] ? actionableAncestor(raw) : raw;
       const payload = {
         element: fingerprint(el),
         trusted: !!ev.isTrusted,
       };
-      if (type === "user_click") {
+      if (CLICK_TYPES[type] && el !== raw) {
+        payload.original_target = fingerprint(raw);
+      }
+      if (CLICK_TYPES[type]) {
         payload.button = ev.button;
         payload.detail = ev.detail;
       }
@@ -412,8 +473,15 @@
       }
       if (type === "user_key") {
         // The key itself is deliberately not recorded for secret fields, and
-        // only structural keys are recorded anywhere -- this is not a keylogger.
+        // only structural keys and modifier shortcuts anywhere -- not a
+        // keylogger.
         payload.key = isSecretField(el) ? null : ev.key;
+        const mods = [];
+        if (ev.ctrlKey) mods.push("Control");
+        if (ev.metaKey) mods.push("Meta");
+        if (ev.altKey) mods.push("Alt");
+        if (ev.shiftKey) mods.push("Shift");
+        if (mods.length) payload.modifiers = mods;
       }
       if (type === "user_submit") {
         payload.action = el.action || null;
@@ -442,6 +510,8 @@
 
   const USER_EVENTS = [
     ["click", "user_click"],
+    ["dblclick", "user_dblclick"],
+    ["contextmenu", "user_rightclick"],
     ["input", "user_input"],
     ["change", "user_change"],
     ["submit", "user_submit"],
@@ -458,8 +528,14 @@
     }
 
     document.addEventListener("keydown", (ev) => {
-      // Only keys that carry workflow meaning. Not every keystroke.
-      if (ev.key === "Enter" || ev.key === "Escape" || ev.key === "Tab") {
+      // Keys that carry workflow meaning: structural navigation keys, and
+      // modifier shortcuts (Ctrl+S, Cmd+Enter). Not every keystroke -- the
+      // literal character of an ordinary keypress is never recorded here.
+      const structural = ev.key === "Enter" || ev.key === "Escape"
+        || ev.key === "Tab";
+      const shortcut = (ev.ctrlKey || ev.metaKey || ev.altKey)
+        && typeof ev.key === "string" && ev.key.length === 1;
+      if (structural || shortcut) {
         onUserEvent("user_key", ev);
       }
     }, { capture: true, passive: true });

@@ -25,6 +25,7 @@ from .selectors import semantic_key
 # Events that can plausibly cause a state change.
 TRIGGER_TYPES = (
     EventType.USER_SUBMIT, EventType.USER_CLICK,
+    EventType.USER_DBLCLICK, EventType.USER_RIGHTCLICK,
     EventType.RUNTIME_HISTORY, EventType.RUNTIME_FORM_SUBMIT,
 )
 

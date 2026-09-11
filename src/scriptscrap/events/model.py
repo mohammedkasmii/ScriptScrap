@@ -69,6 +69,8 @@ class EventType(StrEnum):
 
     # User actions (runtime probe)
     USER_CLICK = "user_click"
+    USER_DBLCLICK = "user_dblclick"
+    USER_RIGHTCLICK = "user_rightclick"
     USER_INPUT = "user_input"
     USER_CHANGE = "user_change"
     USER_SUBMIT = "user_submit"

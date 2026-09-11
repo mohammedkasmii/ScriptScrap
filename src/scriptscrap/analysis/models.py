@@ -246,7 +246,8 @@ class StateTransition:
     evidence: Evidence = field(default_factory=Evidence)
 
 
-WORKFLOW_KINDS = ("navigate", "click", "fill", "select", "check", "press", "submit")
+WORKFLOW_KINDS = ("navigate", "click", "double_click", "right_click", "fill",
+                  "select", "check", "press", "submit")
 
 # Keys that may be reproduced in a generated script. Navigation and control
 # only: a keystroke is application-visible input and can be one character of a

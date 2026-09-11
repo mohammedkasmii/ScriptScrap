@@ -59,6 +59,8 @@ HOME_SECTIONS = frozenset({"", "home", "dashboard", "accueil", "index", "start"}
 # can be a boundary rather than an action within one.
 _ACTION_TYPES = {
     EventType.USER_CLICK: "click",
+    EventType.USER_DBLCLICK: "double_click",
+    EventType.USER_RIGHTCLICK: "right_click",
     EventType.USER_INPUT: "fill",
     EventType.USER_CHANGE: "change",
     EventType.USER_SUBMIT: "submit",

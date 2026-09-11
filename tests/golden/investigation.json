@@ -2,10 +2,11 @@
   "events.jsonl": {
     "by_source": {
       "engine": 22,
-      "playwright": 57
+      "playwright": 58
     },
     "by_type": {
       "capture_gap": 6,
+      "console_message": 1,
       "dom_forms": 4,
       "dom_mutation": "<BATCHED>",
       "dom_snapshot": 4,
@@ -66,6 +67,7 @@
         "navigation_committed",
         "navigation_committed",
         "navigation_committed",
+        "console_message",
         "frame_detached",
         "frame_detached",
         "navigation_committed",
@@ -267,7 +269,7 @@
         "pages": 0
       },
       "lifecycle": {
-        "console_messages": 0,
+        "console_messages": 1,
         "downloads": 0,
         "page_exceptions": 0,
         "pages": 1,
@@ -303,7 +305,7 @@
     },
     "session_id": "<SESSION>",
     "snapshot_fidelity": {
-      "controls_serialized": 38,
+      "controls_serialized": 40,
       "failures": 0,
       "index_mismatches": 0,
       "last_error": null,

@@ -17,7 +17,8 @@ export const title = 'Timeline';
 // Named groups, because "show me what the user did" is the question people
 // actually ask; the raw type list is available beside it.
 const GROUPS = {
-  User: ['user_click', 'user_input', 'user_change', 'user_submit', 'user_key'],
+  User: ['user_click', 'user_dblclick', 'user_rightclick', 'user_input',
+    'user_change', 'user_submit', 'user_key'],
   Network: ['http_request', 'http_response', 'http_failed',
     'runtime_fetch', 'runtime_xhr', 'runtime_beacon', 'runtime_form_submit'],
   Navigation: ['page_opened', 'page_closed', 'popup_opened', 'frame_attached',

@@ -83,6 +83,25 @@ async def _run(tmp_path):
             await page.click("#btn-route")
             await page.wait_for_timeout(600)
 
+            # -- semantic actions -------------------------------------
+            # A double-click and a right-click are distinct intents, not clicks.
+            await page.dblclick("#btn-icon")
+            await page.click("#btn-icon", button="right")
+            # The click lands on a decorative child; the observer must normalise
+            # up to the actionable button and keep the original target.
+            await page.click("#btn-icon .btn-icon-label")
+
+            # A custom ARIA combobox: open it, then choose an option. There is
+            # no native <select> value here -- only accessible state.
+            await page.click("#agent-combo")
+            await page.click("#opt-agent-2")
+
+            # File selection: names and sizes are observed, never content.
+            upload = tmp_path / "justificatif.txt"
+            upload.write_text("fixture upload body", encoding="utf-8")
+            await page.set_input_files("#justificatif", str(upload))
+            await page.wait_for_timeout(200)
+
             await engine.storage_sensor.snapshot(page, reason="mid_session")
 
             # -- navigation survival ----------------------------------
@@ -180,6 +199,66 @@ def test_form_submission_is_observed_before_navigation(log):
     assert {"nom", "ville", "pw"} <= fields
     pw_field = next(f for f in submits[0]["fields"] if f["name"] == "pw")
     assert pw_field["value"]["redacted"] is True
+
+
+# --- semantic actions (agency upgrade) ----------------------------------
+
+def test_double_click_and_right_click_are_distinct_actions(log):
+    assert log.of_type(EventType.USER_DBLCLICK), "no user_dblclick observed"
+    right = _payloads(log, EventType.USER_RIGHTCLICK)
+    assert right, "no user_rightclick observed"
+    assert any((r.get("element") or {}).get("id") == "btn-icon" for r in right)
+
+
+def test_a_click_on_a_decorative_child_normalises_to_the_actionable_button(log):
+    """The click landed on the inner <span>; the observed target is the button,
+    with the original target kept beside it as evidence."""
+    normalised = [
+        p for p in _payloads(log, EventType.USER_CLICK)
+        if (p.get("element") or {}).get("id") == "btn-icon" and "original_target" in p
+    ]
+    assert normalised, "a child click was not normalised to #btn-icon"
+    original = normalised[0]["original_target"]
+    assert original["tag"] in ("span", "svg", "path")
+
+
+def test_the_testid_is_captured_on_the_actionable_element(log):
+    hits = [p for p in _payloads(log, EventType.USER_CLICK)
+            + _payloads(log, EventType.USER_DBLCLICK) + _payloads(log, EventType.USER_RIGHTCLICK)
+            if (p.get("element") or {}).get("id") == "btn-icon"]
+    assert hits
+    assert any((h["element"].get("dataset") or {}).get("testid") == "icon-action"
+               for h in hits), "data-testid was not captured"
+
+
+def test_a_custom_aria_combobox_state_is_captured(log):
+    """No native value -- only accessible state. The trigger must carry the
+    listbox it controls, so offline analysis can connect them."""
+    clicks = _payloads(log, EventType.USER_CLICK)
+    combo = next((c for c in clicks
+                  if (c.get("element") or {}).get("id") == "agent-combo"), None)
+    assert combo is not None, "the combobox trigger was not observed"
+    aria = combo["element"].get("aria") or {}
+    assert aria.get("aria-controls") == "agent-list"
+    assert aria.get("aria-haspopup") == "listbox"
+    assert "aria-expanded" in aria
+    # The option the operator chose is itself an actionable role=option.
+    option = next((c for c in clicks
+                   if (c.get("element") or {}).get("id") == "opt-agent-2"), None)
+    assert option is not None, "the chosen option was not observed"
+    assert option["element"].get("role") == "option"
+
+
+def test_file_selection_captures_names_and_sizes_never_content(log):
+    events = _payloads(log, EventType.USER_INPUT) + _payloads(log, EventType.USER_CHANGE)
+    picked = [e for e in events if (e.get("element") or {}).get("id") == "justificatif"]
+    assert picked, "the file input interaction was not observed"
+    value = picked[0]["value"]
+    assert value["count"] == 1
+    assert value["files"][0]["name"] == "justificatif.txt"
+    assert value["files"][0]["size"] > 0
+    # The file body must never appear anywhere in the event.
+    assert "fixture upload body" not in str(picked[0])
 
 
 # --- M2.3 runtime causality --------------------------------------------
