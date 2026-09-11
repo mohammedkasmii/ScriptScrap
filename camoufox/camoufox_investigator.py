@@ -1148,6 +1148,7 @@ class WebHarvester:
         self.emit_event(
             EV.Source.RUNTIME,
             EV.EventType.RUNTIME_HOOKS,
+            page_id=self.registry.page_id(page) if self.registry else None,
             url=page.url,
             hook_calls=len(self.js_hooks),
             functions=sorted(calls_by_function),
@@ -1629,18 +1630,23 @@ class PageCoverage:
     def __init__(self, engine, *, checkpoint_interval: float = 30.0):
         self.engine = engine
         self.checkpoint_interval = checkpoint_interval
-        self.tasks: dict = {}          # page -> scanner Task
+        self.tasks: dict = {}          # page -> cover Task
         self.pages: list = []          # order of appearance, for a stable drain
         self._observed: set = set()    # guard: observe each page exactly once
         self._closing: list = []       # cancel-and-await tasks for closed pages
+        self._was_in_scope: set = set()  # pages we began covering while in scope
+        self._captured: set = set()    # pages whose first snapshot completed
         self._checkpoint_task = None
 
     def start(self, context, initial_page) -> None:
-        self._observe(initial_page)
-        # One context subscription. Duplicate coverage of a page is guarded by
-        # `_observed`, so even if the initial page also arrives via this event
-        # it is not scanned twice.
+        self.engine._initial_page = initial_page
+        # Subscribe FIRST, then enumerate every page that already exists, so a
+        # popup opened during the initial navigation -- before or after this
+        # call -- is covered. `_observed` makes the two paths idempotent.
         context.on("page", self._observe)
+        for page in list(getattr(context, "pages", []) or []):
+            self._observe(page)
+        self._observe(initial_page)
         self.engine.checkpoint(reason="session_start")
         self._checkpoint_task = asyncio.get_running_loop().create_task(
             self._checkpoint_loop())
@@ -1651,26 +1657,84 @@ class PageCoverage:
         self._observed.add(page)
         self.pages.append(page)
         page.on("close", lambda p=page: self._on_close(p))
-        loop = asyncio.get_running_loop()
-        self.tasks[page] = loop.create_task(background_dom_scanner(page, self.engine))
-        # A popup or new tab's isolated-world listeners from the context init
-        # script do not fire, so re-arm them once the page has loaded. The
-        # per-navigation re-arm handles its later documents; this handles the
-        # first one robustly, independent of when the framenavigated listener
-        # was attached.
-        if page is not getattr(self.engine, "_initial_page", None):
-            self._closing.append(loop.create_task(self._rearm_when_ready(page)))
+        self.tasks[page] = asyncio.get_running_loop().create_task(
+            self._cover_page(page))
 
-    async def _rearm_when_ready(self, page) -> None:
-        if self.engine.runtime_sensor is None:
-            return
-        with contextlib.suppress(Exception):
-            await page.wait_for_load_state("load")
-        with contextlib.suppress(Exception):
-            if self.engine.scope.contains(getattr(page, "url", "") or ""):
-                await self.engine.runtime_sensor.rearm_isolated(page.main_frame)
+    async def _cover_page(self, page) -> None:
+        """Cover one page: an eager first snapshot, then the periodic scan.
+
+        The first snapshot does NOT wait for the 2-second poll, so a popup used
+        and closed in under two seconds still yields its DOM/form inventory and a
+        storage snapshot. A page opened while off-scope (about:blank during
+        launch) is picked up by the periodic loop once it navigates in-scope.
+        """
+        try:
+            with contextlib.suppress(Exception):
+                await page.wait_for_load_state("load")
+            in_scope = self.engine.scope.contains(getattr(page, "url", "") or "")
+            if in_scope:
+                self._was_in_scope.add(page)
+                # A popup/new tab's isolated listeners from the context init
+                # script do not fire; re-arm them before the operator can act.
+                if page is not getattr(self.engine, "_initial_page", None):
+                    with contextlib.suppress(Exception):
+                        await self.engine.runtime_sensor.rearm_isolated(page.main_frame)
+                await self._snapshot_once(page, reason="page_observed")
+                self._captured.add(page)
+            await self._scan_loop(page, seeded_in_scope=in_scope)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.engine.emit_sensor_error("page_coverage", exc)
+
+    async def _snapshot_once(self, page, *, reason: str) -> None:
+        """One full snapshot of a page: DOM/form inventory, visual, storage."""
+        await self.engine.scan_all_frames(page)
+        await self.engine.capture_visual_state(page)
+        if self.engine.storage_sensor is not None:
+            await self.engine.storage_sensor.snapshot(page, reason=reason)
+
+    async def _scan_loop(self, page, *, seeded_in_scope: bool) -> None:
+        last_hash = ""
+        last_url = page.url if seeded_in_scope else None
+        while True:
+            await asyncio.sleep(2.0)
+            try:
+                current_url = page.url
+                if not self.engine.scope.contains(current_url or ""):
+                    continue
+                content = await page.content()
+                curr_hash = hashlib.md5(  # noqa: S324
+                    content.encode("utf-8"), usedforsecurity=False).hexdigest()
+                navigated = current_url != last_url
+                if navigated or curr_hash != last_hash:
+                    last_hash = curr_hash
+                    last_url = current_url
+                    if page not in self._was_in_scope:
+                        self._was_in_scope.add(page)
+                    await self.engine.scan_all_frames(page)
+                    await self.engine.capture_visual_state(page)
+                    if navigated and self.engine.storage_sensor is not None:
+                        await self.engine.storage_sensor.snapshot(page, reason="navigation")
+                    self._captured.add(page)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.engine.emit_sensor_error("background_dom_scanner", exc)
 
     def _on_close(self, page) -> None:
+        # A page that was in scope but closed before its first snapshot took its
+        # final state with it -- say so rather than letting it look like a page
+        # that simply held nothing.
+        if page in self._was_in_scope and page not in self._captured:
+            self.engine.emit_capture_gap(
+                "page_closed_before_capture",
+                page_id=(self.engine.registry.page_id(page)
+                         if self.engine.registry else None),
+                note="an in-scope page closed before its DOM/form and storage "
+                     "state could be snapshotted; user actions on it may still "
+                     "have been captured live by the probe",
+            )
         task = self.tasks.pop(page, None)
         if task is None:
             return
@@ -1889,14 +1953,34 @@ async def main(argv=None):
         raise SystemExit(str(exc)) from None
     print(f"[OUTPUT] This session -> {engine.output_dir}")
 
+    async def interact(page, engine):
+        print("\n" + "=" * 60)
+        for line in active_session_banner(forensic_config):
+            print(line)
+        print("=" * 60 + "\n")
+        await asyncio.to_thread(input, "")
+
+    await run_capture(engine, target_url=target_url, forensic_config=forensic_config,
+                      headless=args.headless, interact=interact, announce=True)
+
+
+async def run_capture(engine, *, target_url, forensic_config, headless, interact,
+                      locale="fr-FR", timezone_id="Europe/Paris", announce=False):
+    """The one production capture runner, shared by the CLI and the tests.
+
+    Launch -> attach sensors -> START COVERAGE (before the first navigation, so a
+    popup opened during it cannot be missed) -> navigate -> hand control to
+    `interact` (the CLI waits for ENTER; a test scripts the workflow) -> stop
+    coverage, which drains every in-scope page -> export. Both entry points use
+    this, so a test cannot exercise a different page-coverage ordering from
+    production.
+    """
     # exclude_addons is load-bearing: Camoufox installs uBlock Origin as a
     # default addon, which silently filters requests out of the capture.
-    #
     # main_world_eval is equally load-bearing: without it the runtime probe's
-    # patched instruments land in the isolated world and observe nothing, which
-    # is exactly how a whole capture came back with zero fetch/XHR evidence.
+    # patched instruments land in the isolated world and observe nothing.
     launch_options = {
-        "headless": args.headless,
+        "headless": headless,
         "humanize": True,
         "os": "windows",
         "geoip": False,
@@ -1904,55 +1988,53 @@ async def main(argv=None):
         "exclude_addons": [DefaultAddons.UBO],
         "main_world_eval": True,
     }
-    # Forensic mode must be brought up BEFORE launch: the extension is built
-    # with the transport port baked in. Non-fatal by design -- a transport that
-    # cannot bind costs the extra evidence, not the session.
     if forensic_config is not None:
         launch_options.update(start_forensic_layer(engine, forensic_config))
-        print("    [forensic] extension enabled — bodies, script source, real "
-              "cookie jar. See the manifest for exactly what is on.")
-        if forensic_config.rewriting_active:
-            print("    [forensic] SOURCE REWRITING ACTIVE — this session is NOT "
-                  "pure observation.")
+        if announce:
+            print("    [forensic] extension enabled — bodies, script source, "
+                  "real cookie jar. See the manifest for exactly what is on.")
+            if forensic_config.rewriting_active:
+                print("    [forensic] SOURCE REWRITING ACTIVE — not pure observation.")
     engine.record_launch_options(launch_options)
 
-    print("\n🦊 [CAMOUFOX] Booting active introspection engine...")
-    print("    [addons] uBlock Origin EXCLUDED — capturing the app's real requests.")
+    if announce:
+        print("\n🦊 [CAMOUFOX] Booting active introspection engine...")
+        print("    [addons] uBlock Origin EXCLUDED — capturing real requests.")
     announce_browser_baseline(engine)
+
+    coverage = None
     try:
         async with AsyncCamoufox(**launch_options) as browser:
-            page = await browser.new_page(locale="fr-FR", timezone_id="Europe/Paris")
-
+            page = await browser.new_page(locale=locale, timezone_id=timezone_id)
             await attach_engine_to_page(page, engine)
 
-            print(f"🚀 Infiltrating {target_url}...")
-            await page.goto(target_url, wait_until="load")
-
-            # Full coverage for every page/tab/popup the employee opens, not
-            # only this one: a scanner per page, and drain-all on session end.
+            # Coverage BEFORE the first navigation: a page the target opens
+            # during load is then observed, not missed.
             coverage = PageCoverage(engine)
             coverage.start(page.context, page)
 
-            print("\n" + "=" * 60)
-            for line in active_session_banner(forensic_config):
-                print(line)
-            print("=" * 60 + "\n")
+            if announce:
+                print(f"🚀 Infiltrating {target_url}...")
+            await page.goto(target_url, wait_until="load")
 
-            await asyncio.to_thread(input, "")
-            # Cancels every scanner and drains every remaining in-scope page.
+            await interact(page, engine)
+
             await coverage.stop()
             engine.outcome = "clean"
-
     except KeyboardInterrupt:
         engine.outcome = "interrupted"
         print("\n⚠️ Session interrupted by the operator")
-    except Exception as e:
+        if coverage is not None:
+            with contextlib.suppress(Exception):
+                await coverage.stop()
+    except Exception as exc:
         engine.outcome = "failed"
-        print(f"\n⚠️ Session ended with an error: {e}")
+        print(f"\n⚠️ Session ended with an error: {exc}")
     finally:
         if forensic_config is not None:
             stop_forensic_layer(engine)
         engine.export()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

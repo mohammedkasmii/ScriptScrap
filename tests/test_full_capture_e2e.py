@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,92 +24,119 @@ from scriptscrap.events import EventLogReader, EventType
 pytestmark = pytest.mark.browser
 
 
-async def _capture(out: Path):
-    from camoufox.addons import DefaultAddons
-    from camoufox.async_api import AsyncCamoufox
+async def _workflow(page, engine):
+    """The scripted agency workflow, run as run_capture's `interact`.
 
+    run_capture has already launched, attached sensors, started coverage BEFORE
+    the first navigation, and navigated to the main page -- exactly as the CLI
+    does. `page` is that main page.
+    """
+    await page.wait_for_selector("html[data-fixture-ready='true']", state="attached")
+    await page.fill("#nom", "Alice Benali")
+    await page.check("#accord")
+    await page.check("#type-choc")
+    await page.select_option("#ville", "mar")
+    await page.click("#agent-combo")
+    await page.click("#opt-agent-2")
+    await page.dblclick("#btn-icon")
+
+    # -- a popup with a form -------------------------------------
+    async with page.context.expect_page() as popup_info:
+        await page.click("#btn-popup")
+    popup = await popup_info.value
+    await popup.wait_for_load_state("load")
+    await popup.wait_for_function("() => (window.__scriptscrapRearmCount||0) >= 1")
+    await popup.fill("#p2-reference", "REF-E2E-1")
+    await popup.select_option("#p2-etat", "clos")
+    await popup.click("#btn-page2-submit")
+    await popup.wait_for_load_state("load")
+
+    # -- a second tab: a table with sort/filter/paginate ---------
+    async with page.context.expect_page() as tab_info:
+        await page.evaluate("() => window.open('/table-demo', '_blank')")
+    tab = await tab_info.value
+    await tab.wait_for_load_state("load")
+    await tab.wait_for_function("() => (window.__scriptscrapRearmCount||0) >= 1")
+    await tab.click("#col-client")
+    await tab.fill("#table-filter", "alpha")
+    await tab.click(".row-edit[data-id='D-1001']")
+    await tab.click("#next-page")
+    await tab.wait_for_timeout(200)
+
+    # -- a third tab: hover, dialog, drag/drop, virtualized table -
+    async with page.context.expect_page() as rich_info:
+        await page.evaluate("() => window.open('/interactions', '_blank')")
+    rich = await rich_info.value
+    await rich.wait_for_load_state("load")
+    await rich.wait_for_function("() => (window.__scriptscrapRearmCount||0) >= 1")
+    await rich.hover("#menu-trigger")
+    await rich.wait_for_timeout(120)
+    await rich.click("#btn-confirm")
+    await rich.wait_for_timeout(120)
+    await rich.click("#sim-drag")
+    await rich.wait_for_timeout(120)
+    for top in (300, 700, 1100):
+        await rich.eval_on_selector("#virt-wrap", f"el => el.scrollTo(0, {top})")
+        await rich.wait_for_timeout(400)
+
+
+async def _capture(work_root: Path) -> Path:
+    """Run a capture through the PRODUCTION runner, into the DEFAULT timestamped
+    output directory, and return that directory."""
     from scriptscrap.fixture import FixtureServer
     from scriptscrap.testing.capture import load_investigator
 
     inv = load_investigator()
-    with FixtureServer() as fx:
-        scope = inv.InvestigationScope(fx.base_url)
-        engine = inv.WebHarvester(fx.base_url, scope,
-                                  session_id="sess-20260101-000000", output_dir=out)
-        engine.record_launch_options({"headless": True})
-
-        async with AsyncCamoufox(
-            headless=True, humanize=False, os="windows", geoip=False,
-            exclude_addons=[DefaultAddons.UBO], main_world_eval=True,
-        ) as browser:
-            page = await browser.new_page()
-            await inv.attach_engine_to_page(page, engine)
-            coverage = inv.PageCoverage(engine)
-            coverage.start(page.context, page)
-
-            # -- main page: native select, radio, checkbox, ARIA combobox --
-            await page.goto(fx.base_url + "/", wait_until="load")
-            await page.wait_for_selector("html[data-fixture-ready='true']",
-                                         state="attached")
-            await page.fill("#nom", "Alice Benali")
-            await page.check("#accord")
-            await page.check("#type-choc")
-            await page.select_option("#ville", "mar")
-            await page.click("#agent-combo")
-            await page.click("#opt-agent-2")
-            await page.dblclick("#btn-icon")
-
-            # -- a popup with a form -------------------------------------
-            async with page.context.expect_page() as popup_info:
-                await page.click("#btn-popup")
-            popup = await popup_info.value
-            await popup.wait_for_load_state("load")
-            await popup.wait_for_function("() => (window.__scriptscrapRearmCount||0) >= 1")
-            await popup.fill("#p2-reference", "REF-E2E-1")
-            await popup.select_option("#p2-etat", "clos")
-            await popup.click("#btn-page2-submit")
-            await popup.wait_for_load_state("load")
-
-            # -- a second tab: a table with sort/filter/paginate ---------
-            # Opened with window.open (a real new tab in the context); the
-            # implicit context from browser.new_page() forbids new_page().
-            async with page.context.expect_page() as tab_info:
-                await page.evaluate("() => window.open('/table-demo', '_blank')")
-            tab = await tab_info.value
-            await tab.wait_for_load_state("load")
-            await tab.wait_for_function("() => (window.__scriptscrapRearmCount||0) >= 1")
-            await tab.click("#col-client")
-            await tab.fill("#table-filter", "alpha")
-            await tab.click(".row-edit[data-id='D-1001']")
-            await tab.click("#next-page")
-            await tab.wait_for_timeout(200)
-
-            # -- a third tab: hover, dialog, drag/drop, virtualized table -
-            async with page.context.expect_page() as rich_info:
-                await page.evaluate("() => window.open('/interactions', '_blank')")
-            rich = await rich_info.value
-            await rich.wait_for_load_state("load")
-            await rich.wait_for_function("() => (window.__scriptscrapRearmCount||0) >= 1")
-            await rich.hover("#menu-trigger")
-            await rich.wait_for_timeout(120)
-            await rich.click("#btn-confirm")
-            await rich.wait_for_timeout(120)
-            await rich.click("#sim-drag")
-            await rich.wait_for_timeout(120)
-            for top in (300, 700, 1100):
-                await rich.eval_on_selector("#virt-wrap", f"el => el.scrollTo(0, {top})")
-                await rich.wait_for_timeout(400)
-
-            await coverage.stop()
-            engine.outcome = "clean"
-        engine.close_events()
+    prev_cwd = Path.cwd()
+    os.chdir(work_root)          # so the default scriptscrap_output/ lands here
+    try:
+        with FixtureServer() as fx:
+            scope = inv.InvestigationScope(fx.base_url)
+            # No output_dir: exercise the default timestamped directory.
+            engine = inv.WebHarvester(fx.base_url, scope)
+            await inv.run_capture(
+                engine, target_url=fx.base_url + "/", forensic_config=None,
+                headless=True, interact=_workflow)
+            # Resolve while still chdir'd: the default output dir is relative.
+            return (work_root / engine.output_dir).resolve()
+    finally:
+        os.chdir(prev_cwd)
 
 
 @pytest.fixture(scope="module")
 def capture_dir(tmp_path_factory) -> Path:
-    out = tmp_path_factory.mktemp("e2e") / "session"
-    asyncio.run(_capture(out))
-    return out
+    work = tmp_path_factory.mktemp("e2e")
+    return asyncio.run(_capture(work))
+
+
+def test_the_capture_used_the_default_timestamped_output(capture_dir):
+    assert capture_dir.parent.name == "scriptscrap_output"
+    assert capture_dir.name.startswith("session-")
+    assert (capture_dir / "session_manifest.json").is_file()
+
+
+def test_the_manifest_records_a_clean_session_and_session_end(capture_dir):
+    manifest = json.loads((capture_dir / "session_manifest.json").read_text("utf-8"))
+    assert manifest["outcome"] == "clean"
+    assert manifest["completion"]["clean"] is True
+    log = EventLogReader(capture_dir / "events.jsonl")
+    assert str(log.events[-1].type) == "session_end", "SESSION_END was not last"
+
+
+def test_every_open_page_was_drained_at_session_end(capture_dir):
+    """Drain-all: each in-scope page open at session end is drained (a per-page
+    runtime_hooks dump) BEFORE the context teardown closes it.
+
+    The old runner drained only the initial page; here all tabs/popups are.
+    """
+    log = EventLogReader(capture_dir / "events.jsonl")
+    hooks_pages = {e.page_id for e in log.of_type(EventType.RUNTIME_HOOKS) if e.page_id}
+    open_pages = {e.page_id for e in log.of_type(EventType.PAGE_OPENED) if e.page_id}
+    # Several pages were opened (main + popup + two tabs), and every one was
+    # drained -- not just the first.
+    assert len(open_pages) >= 3, f"expected several pages, saw {open_pages}"
+    assert open_pages <= hooks_pages, (
+        f"pages opened but not drained: {open_pages - hooks_pages}")
 
 
 def test_the_capture_is_a_valid_multipage_log(capture_dir):

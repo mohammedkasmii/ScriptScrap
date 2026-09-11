@@ -982,6 +982,21 @@ TABLE_PAGE_HTML = """<!DOCTYPE html>
 </html>
 """
 
+OPENS_POPUP_PAGE_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>ScriptScrap Fixture - Opens Popup</title></head>
+<body>
+<h1 id="titre-opener">Ouverture automatique</h1>
+<script>
+/* Opens a popup DURING this page's initial load, so coverage started before
+   the first navigation must still catch it. */
+window.__fixtureAutoPopup = window.open("/page2?auto=1", "autopopup");
+document.documentElement.setAttribute("data-fixture-opener-ready", "true");
+</script>
+</body>
+</html>
+"""
+
 INTERACTIONS_PAGE_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>

@@ -353,6 +353,7 @@ _STATIC_GET: dict[str, _Response] = {
     "/page2": _html(content.PAGE2_HTML),
     "/table-demo": _html(content.TABLE_PAGE_HTML),
     "/interactions": _html(content.INTERACTIONS_PAGE_HTML),
+    "/opens-popup": _html(content.OPENS_POPUP_PAGE_HTML),
     "/frame/outer": _html(content.FRAME_OUTER_HTML),
     "/frame/inner": _html(content.FRAME_INNER_HTML),
     "/assets/app.css": _Response(200, CT_CSS, content.APP_CSS.encode("utf-8")),
