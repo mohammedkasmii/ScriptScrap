@@ -219,7 +219,7 @@ _HTML_TAGS = frozenset({
     "a", "button", "input", "select", "textarea", "option", "label", "form",
     "div", "span", "li", "td", "th", "tr", "summary", "details", "img",
     "svg", "path", "p", "h1", "h2", "h3", "h4", "h5", "h6", "b", "strong",
-    "em", "i", "ul", "ol", "table", "tbody", "thead", "section", "nav",
+    "em", "i", "ins", "pre", "ul", "ol", "table", "tbody", "thead", "section", "nav",
     "header", "footer", "main", "article", "aside", "iframe", "canvas",
 })
 # WAI-ARIA widget, document-structure and landmark roles. `role` is an
