@@ -360,6 +360,80 @@
     "aria-checked", "aria-activedescendant", "aria-haspopup", "aria-pressed",
     "aria-current", "aria-disabled"];
 
+  // When an action happens inside a table (native or an ARIA grid), the table
+  // is part of what the action MEANS -- a click on a row's Edit button, a sort
+  // on a column header, a filter typed above the rows. Captured so offline
+  // analysis can reconstruct the table and connect the operator's actions to
+  // it. Bounded: a virtualised table can hold thousands of rows, so only the
+  // interacted row and the header row are read.
+  function tableContext(el) {
+    try {
+      if (!el || !el.closest) return null;
+      let table = el.closest("table,[role=table],[role=grid],[role=treegrid]");
+      // A filter box or a pager usually sits OUTSIDE the table it drives and
+      // declares the relationship with aria-controls. Resolve it, so those
+      // operations attach to the table they act on rather than being lost.
+      let via = null;
+      if (!table) {
+        const controls = el.getAttribute && el.getAttribute("aria-controls");
+        if (controls) {
+          const target = document.getElementById(controls);
+          if (target && target.closest) {
+            table = target.closest("table,[role=table],[role=grid],[role=treegrid]")
+              || (/(table|grid)/i.test(target.getAttribute("role") || "")
+                  || target.tagName === "TABLE" ? target : null);
+            if (table) via = "aria-controls";
+          }
+        }
+      }
+      if (!table) return null;
+      const ctx = {
+        table_id: table.id || (table.getAttribute
+          && table.getAttribute("aria-label")) || null,
+      };
+      if (via) ctx.via = via;
+      const caption = table.querySelector && table.querySelector("caption");
+      if (caption) ctx.caption = clip((caption.textContent || "").trim().slice(0, 120));
+
+      let headers = [];
+      const thead = table.querySelector && table.querySelector("thead");
+      const scope = thead || table;
+      if (scope.querySelectorAll) {
+        headers = Array.prototype.slice.call(
+          scope.querySelectorAll("th,[role=columnheader]"), 0, 40);
+      }
+      if (headers.length) {
+        ctx.columns = headers.map((h) =>
+          clip((h.innerText || h.textContent || "").trim().slice(0, 60)));
+      }
+
+      const row = el.closest("tr,[role=row]");
+      if (row) {
+        ctx.row_id = row.id || (row.getAttribute && (row.getAttribute("data-id")
+          || row.getAttribute("data-row-id"))) || null;
+        const cells = row.querySelectorAll
+          ? Array.prototype.slice.call(
+              row.querySelectorAll("td,th,[role=cell],[role=gridcell]"), 0, 40)
+          : [];
+        if (cells.length) {
+          ctx.cells = cells.map((c) =>
+            clip((c.innerText || c.textContent || "").trim().slice(0, 80)));
+        }
+        if (row.parentElement) {
+          const kin = Array.prototype.filter.call(
+            row.parentElement.children, (r) => r.tagName === row.tagName);
+          ctx.row_index = kin.indexOf(row);
+        }
+        // Whether the interacted element is itself a header cell -- the signal
+        // that a click was a column sort rather than a row action.
+        ctx.on_header = !!(el.closest && el.closest("th,[role=columnheader],thead"));
+      }
+      return ctx;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function fingerprint(el) {
     if (!el || el.nodeType !== 1) return null;
     const tag = el.tagName.toLowerCase();
@@ -461,6 +535,8 @@
         element: fingerprint(el),
         trusted: !!ev.isTrusted,
       };
+      const tctx = tableContext(el);
+      if (tctx) payload.table = tctx;
       if (CLICK_TYPES[type] && el !== raw) {
         payload.original_target = fingerprint(raw);
       }

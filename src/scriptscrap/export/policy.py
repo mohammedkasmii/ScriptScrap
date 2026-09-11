@@ -579,6 +579,9 @@ POLICY: dict[tuple[str, str], Disposition] = {
     # typed. It is dropped from a shareable export and read from the local
     # session; a sanitised catalog is future work.
     ("AnalysisResult", "forms"): Disposition.DROP,
+    # The table catalog carries cell contents -- business data straight off the
+    # screen. Dropped from a shareable export; read from the local session.
+    ("AnalysisResult", "tables"): Disposition.DROP,
     # NOT counts. Verified against the real capture: capture_health holds
     # `overall: "PARTIAL / HIGH COVERAGE"`, eight `sensors[].reasons` strings
     # and two `notes` strings, all with whitespace. A COUNTS disposition would

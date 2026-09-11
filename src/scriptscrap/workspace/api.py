@@ -552,6 +552,29 @@ def forms(workspace, query) -> dict:
     } for f in result.forms]}
 
 
+# --- tables ---------------------------------------------------------------
+
+def tables(workspace, query) -> dict:
+    """The tables the operator worked, reconstructed from the interactions.
+
+    Re-derived per session and memoised on the log's identity, like the other
+    log-backed views; a sanitised export raises EvidenceUnavailable (409).
+    """
+    handle = _handle(workspace, query)
+    result = _analysis_for(handle)
+    return {"tables": [{
+        "table_id": t.table_id,
+        "table_key": t.table_key,
+        "frame_id": t.frame_id,
+        "caption": t.caption,
+        "columns": t.columns,
+        "rows": t.rows,
+        "row_actions": t.row_actions,
+        "operations": t.operations,
+        "evidence_ids": t.evidence.event_ids,
+    } for t in result.tables]}
+
+
 # --- workflow -------------------------------------------------------------
 
 def workflow(workspace, query) -> dict:
@@ -733,6 +756,7 @@ ROUTES = {
     "generate": generate,
     "segments": segments,
     "forms": forms,
+    "tables": tables,
     "session": session_overview,
     "endpoints": endpoints,
     "endpoint": endpoint_detail,

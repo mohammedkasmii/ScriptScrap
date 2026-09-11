@@ -36,6 +36,7 @@ from .segmentation import ActivitySegment, SegmentationAnalyzer
 from .selectors import SelectorAnalyzer, generated_id_warning, semantic_key
 from .states import StateAnalyzer, route_shape
 from .store import DerivedStore
+from .tables import TableCatalogAnalyzer, TableCatalogEntry
 from .technology import TechnologyAnalyzer
 
 __all__ = [
@@ -62,6 +63,8 @@ __all__ = [
     "SelectorAnalyzer",
     "StateAnalyzer",
     "StateTransition",
+    "TableCatalogAnalyzer",
+    "TableCatalogEntry",
     "Technology",
     "TechnologyAnalyzer",
     "UIElement",

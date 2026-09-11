@@ -903,6 +903,85 @@ FRAME_INNER_HTML = """<!DOCTYPE html>
 </html>
 """
 
+TABLE_PAGE_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>ScriptScrap Fixture - Table</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<h1 id="titre-table">Dossiers</h1>
+
+<input type="search" id="table-filter" name="filtre"
+       placeholder="Filtrer les dossiers" aria-controls="dossiers">
+
+<table id="dossiers" aria-label="Dossiers">
+  <caption>Dossiers ouverts</caption>
+  <thead>
+    <tr>
+      <th id="col-id" data-sort="id">Reference</th>
+      <th id="col-client" data-sort="client">Client</th>
+      <th id="col-montant" data-sort="montant">Montant</th>
+      <th id="col-actions">Actions</th>
+    </tr>
+  </thead>
+  <tbody id="dossiers-body">
+    <tr data-id="D-1001"><td>D-1001</td><td>Alpha</td><td>1200</td>
+      <td><button type="button" class="row-edit" data-id="D-1001">Editer</button></td></tr>
+    <tr data-id="D-1002"><td>D-1002</td><td>Beta</td><td>800</td>
+      <td><button type="button" class="row-edit" data-id="D-1002">Editer</button></td></tr>
+    <tr data-id="D-1003"><td>D-1003</td><td>Gamma</td><td>450</td>
+      <td><button type="button" class="row-edit" data-id="D-1003">Editer</button></td></tr>
+  </tbody>
+</table>
+
+<div id="pagination">
+  <button type="button" id="prev-page" aria-controls="dossiers">Precedent</button>
+  <span id="page-indicator">Page 1</span>
+  <button type="button" id="next-page" aria-controls="dossiers">Suivant</button>
+</div>
+<div id="table-status"></div>
+
+<script>
+(function () {
+  "use strict";
+  var page = 1;
+  function status(text) { document.getElementById("table-status").textContent = text; }
+  document.getElementById("table-filter").addEventListener("input", function (ev) {
+    var term = ev.target.value.toLowerCase();
+    var rows = document.querySelectorAll("#dossiers-body tr");
+    for (var i = 0; i < rows.length; i += 1) {
+      rows[i].hidden = term && rows[i].textContent.toLowerCase().indexOf(term) === -1;
+    }
+    status("filtre=" + term);
+  });
+  var headers = document.querySelectorAll("#dossiers thead th[data-sort]");
+  for (var h = 0; h < headers.length; h += 1) {
+    headers[h].addEventListener("click", function (ev) {
+      status("tri=" + ev.currentTarget.getAttribute("data-sort"));
+    });
+  }
+  var edits = document.querySelectorAll(".row-edit");
+  for (var e = 0; e < edits.length; e += 1) {
+    edits[e].addEventListener("click", function (ev) {
+      status("editer=" + ev.currentTarget.getAttribute("data-id"));
+    });
+  }
+  document.getElementById("next-page").addEventListener("click", function () {
+    page += 1; document.getElementById("page-indicator").textContent = "Page " + page;
+  });
+  document.getElementById("prev-page").addEventListener("click", function () {
+    if (page > 1) { page -= 1; }
+    document.getElementById("page-indicator").textContent = "Page " + page;
+  });
+  document.documentElement.setAttribute("data-fixture-table-ready", "true");
+})();
+</script>
+</body>
+</html>
+"""
+
 NOT_FOUND_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head><meta charset="utf-8"><title>ScriptScrap Fixture - 404</title></head>

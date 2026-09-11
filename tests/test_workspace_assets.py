@@ -24,9 +24,9 @@ import pytest
 ASSETS = Path(__file__).resolve().parents[1] / "src" / "scriptscrap" / "workspace" / "assets"
 
 EXPECTED_VIEWS = {
-    "overview.js", "timeline.js", "activities.js", "forms.js", "endpoints.js",
-    "states.js", "elements.js", "schemas.js", "dependencies.js",
-    "technology.js", "generate.js",
+    "overview.js", "timeline.js", "activities.js", "forms.js", "tables.js",
+    "endpoints.js", "states.js", "elements.js", "schemas.js",
+    "dependencies.js", "technology.js", "generate.js",
 }
 EXPECTED_LIB = {"dom.js", "api.js", "evidence.js", "graph.js"}
 
@@ -117,6 +117,7 @@ def test_the_redaction_badge_is_wired_to_the_api():
     ("timeline.js", "timeline"),
     ("activities.js", "segments"),
     ("forms.js", "forms"),
+    ("tables.js", "tables"),
     ("endpoints.js", "endpoints"),
     ("states.js", "states"),
     ("elements.js", "ui_elements"),

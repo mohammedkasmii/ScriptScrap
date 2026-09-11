@@ -132,6 +132,16 @@ async def _run(tmp_path):
             await page.click("#btn-submit")
             await page.wait_for_load_state("load")
 
+            # -- tables: sort, filter, paginate, row action -----------
+            await page.goto(fx.base_url + "/table-demo", wait_until="load")
+            await page.wait_for_selector("html[data-fixture-table-ready='true']",
+                                         state="attached")
+            await page.click("#col-client")                       # sort a column
+            await page.fill("#table-filter", "alpha")             # filter
+            await page.click(".row-edit[data-id='D-1001']")       # row action
+            await page.click("#next-page")                        # paginate
+            await page.wait_for_timeout(150)
+
             # A heartbeat recovery point, as the background scanner emits during
             # a long session.
             engine.checkpoint(reason="test")
@@ -329,29 +339,32 @@ def test_runtime_call_and_network_request_share_a_join_key(log):
 def test_probe_ordinals_are_monotonic_within_a_frame_and_world(log):
     """In-page ordering is recoverable even though ingest order is not.
 
-    The scope of that guarantee is one frame in one JS WORLD. The probe runs in
-    two -- listeners in the isolated world, patched instruments in the page's
-    own -- and each counts its own ordinals. Comparing them across worlds is
-    the same mistake as comparing `seq` across sensors, so the join key
-    includes `probe_world`.
+    The scope of that guarantee is one frame in one JS WORLD in one DOCUMENT:
+    an ordinal restarts on navigation (it counts from the document's
+    navigation-start epoch), while a frame id survives navigation. So the join
+    key includes `probe_world` AND the document's `probe_time_origin` -- a frame
+    that navigates twice legitimately shows two ascending runs, one per
+    document, and comparing across them is the same mistake as comparing `seq`
+    across sensors.
     """
-    by_frame_world: dict[tuple[str, str], list[int]] = {}
+    by_key: dict[tuple, list[int]] = {}
     worlds: set[str] = set()
     for event in log:
         if event.source is Source.RUNTIME and event.payload.get("probe_ordinal"):
             world = event.payload.get("probe_world") or "isolated"
             worlds.add(world)
-            by_frame_world.setdefault(
-                (event.frame_id or "?", world), []
+            origin = event.payload.get("probe_time_origin")
+            by_key.setdefault(
+                (event.frame_id or "?", world, origin), []
             ).append(event.payload["probe_ordinal"])
 
-    assert by_frame_world, "no probe events carried an ordinal"
+    assert by_key, "no probe events carried an ordinal"
     assert worlds == {"isolated", "main"}, (
         f"expected evidence from both probe roles, got {sorted(worlds)}. "
         "A missing 'main' means the patched instruments never reached the page.")
-    for (frame_id, world), ordinals in by_frame_world.items():
+    for (frame_id, world, origin), ordinals in by_key.items():
         assert ordinals == sorted(ordinals), (
-            f"probe ordinals out of order in {frame_id} / {world} world")
+            f"probe ordinals out of order in {frame_id} / {world} world / doc {origin}")
 
 
 def test_history_api_is_observed(log):
@@ -503,6 +516,36 @@ def test_failed_request_url_is_the_dead_port(log):
 
 
 # --- capture honesty -----------------------------------------------------
+
+def test_table_context_is_captured_on_interaction(log):
+    """A click inside a table carries the table's identity, columns and the
+    row's cells, so the table can be reconstructed offline."""
+    with_table = [p for p in _payloads(log, EventType.USER_CLICK) if p.get("table")]
+    assert with_table, "no interaction carried table context"
+    edit = next((p for p in with_table
+                 if (p.get("element") or {}).get("text") == "Editer"), None)
+    assert edit is not None, "the row action was not captured with its table"
+    table = edit["table"]
+    assert table["table_id"] == "dossiers"
+    assert "Client" in table["columns"]
+    assert "Alpha" in table["cells"]
+    assert table["row_id"] == "D-1001"
+
+
+def test_the_table_catalog_reconstructs_the_worked_table(log):
+    from scriptscrap.analysis import analyze_events
+
+    result = analyze_events(list(log), "s")
+    table = next((t for t in result.tables if t.table_id == "dossiers"), None)
+    assert table is not None, "the worked table was not catalogued"
+    assert table.caption == "Dossiers ouverts"
+    assert "Client" in table.columns
+    assert any(r["cells"][1] == "Alpha" for r in table.rows)
+    assert "Editer" in table.row_actions
+    assert table.operations.get("sort", 0) >= 1
+    assert table.operations.get("filter", 0) >= 1
+    assert table.operations.get("paginate", 0) >= 1
+
 
 def test_a_checkpoint_records_progress_for_a_long_session(log):
     """A heartbeat so an interrupted capture shows how far it got."""

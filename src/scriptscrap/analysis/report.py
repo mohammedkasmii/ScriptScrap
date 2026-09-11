@@ -212,6 +212,32 @@ def render(result: AnalysisResult) -> str:
                              f"`{form.outcome.get('route') or form.outcome.get('status') or ''}`")
             lines.append("")
 
+    # -- tables ------------------------------------------------------------
+    if result.tables:
+        lines += ["## Tables", "",
+                  "The tables the operator worked, reconstructed from the "
+                  "interactions with them: identity, columns, the rows actually "
+                  "observed, the row actions, and the sort/filter/paginate "
+                  "operations performed. Rows are those the operator touched, "
+                  "not every row the table ever held.", ""]
+        for tbl in result.tables:
+            title = f"`{tbl.table_id or tbl.table_key}`"
+            if tbl.caption:
+                title += f" — {tbl.caption}"
+            lines += [f"### {title}", ""]
+            if tbl.columns:
+                lines.append(f"- columns: {', '.join('`' + c + '`' for c in tbl.columns if c)}")
+            if tbl.row_actions:
+                lines.append(f"- row actions: {', '.join(tbl.row_actions)}")
+            if tbl.operations:
+                lines.append("- operations: "
+                             + ", ".join(f"{k}×{v}" for k, v in tbl.operations.items()))
+            lines.append("")
+            lines += _table(
+                ["Row"] + [c or "—" for c in (tbl.columns or [])],
+                [[r.get("row_id") or r.get("row_index")] + list(r.get("cells") or [])
+                 for r in tbl.rows])
+
     # -- inferred activities ----------------------------------------------
     if result.segments:
         lines += ["## Inferred activities", "",

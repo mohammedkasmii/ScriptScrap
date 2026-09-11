@@ -368,6 +368,10 @@ class AnalysisResult:
     # option choices, the submit and the request/outcome it produced. Empty
     # when no form was touched.
     forms: list[Any] = field(default_factory=list)
+    # A catalog of the tables the operator worked: identity, columns, the rows
+    # observed, row actions, and the sort/filter/paginate operations performed.
+    # Empty when no table was interacted with.
+    tables: list[Any] = field(default_factory=list)
     health: dict[str, Any] | None = None
     scripts: list[dict[str, Any]] = field(default_factory=list)
     # Credential-bearing header NAMES the application sent, and how often.

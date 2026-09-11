@@ -29,6 +29,7 @@ from .schema import SchemaInferrer
 from .segmentation import SegmentationAnalyzer
 from .selectors import SelectorAnalyzer
 from .states import StateAnalyzer
+from .tables import TableCatalogAnalyzer
 from .technology import TechnologyAnalyzer, opaque_state_fields
 from .workflow import WorkflowAnalyzer
 
@@ -61,6 +62,8 @@ def analyze_events(events: list[Event], session_id: str) -> AnalysisResult:
     # The forms the operator used, assembled from the scattered observations
     # of each one into a single per-form record.
     result.forms = FormCatalogAnalyzer().analyze(events)
+    # The tables the operator worked, and what was observed of each.
+    result.tables = TableCatalogAnalyzer().analyze(events)
     # Forensic evidence, when present. A normal session yields empty lists and
     # a health report built from the sensors that did run -- analysis must
     # never require the extension.

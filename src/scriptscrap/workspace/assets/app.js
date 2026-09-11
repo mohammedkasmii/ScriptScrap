@@ -11,6 +11,7 @@ import * as overview from './views/overview.js';
 import * as timeline from './views/timeline.js';
 import * as activities from './views/activities.js';
 import * as forms from './views/forms.js';
+import * as tables from './views/tables.js';
 import * as endpoints from './views/endpoints.js';
 import * as states from './views/states.js';
 import * as elements from './views/elements.js';
@@ -24,6 +25,7 @@ const VIEWS = [
   ['timeline', timeline],
   ['activities', activities],
   ['forms', forms],
+  ['tables', tables],
   ['endpoints', endpoints],
   ['states', states],
   ['elements', elements],

@@ -323,7 +323,8 @@ details[open] > summary::before { content: "▾"; }
 body.no-evidence .timeline-link,
 body.no-evidence [data-view="timeline"],
 body.no-evidence [data-view="activities"],
-body.no-evidence [data-view="forms"] {
+body.no-evidence [data-view="forms"],
+body.no-evidence [data-view="tables"] {
   display: none;
 }
 
