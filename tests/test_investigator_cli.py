@@ -74,3 +74,34 @@ def test_source_rewriting_is_a_separate_opt_in():
 def test_headless_is_off_by_default_and_can_be_set():
     assert inv.parse_cli_args([]).headless is False
     assert inv.parse_cli_args(["--headless"]).headless is True
+
+
+def test_normal_mode_banner_does_not_claim_forensic_capture():
+    """Normal mode must not CLAIM it captures full bodies or forensic evidence.
+
+    Naming them in a negation ("does NOT capture full bodies") is exactly the
+    correction; what must be absent is a positive claim.
+    """
+    banner = " ".join(inv.active_session_banner(None)).lower()
+    assert "normal mode" in banner
+    assert "forensic mode" not in banner
+    assert "sample" in banner                       # says what it DOES record
+    assert "does not capture full bodies" in banner  # and what it does not
+    # No positive claim of forensic capture.
+    assert "captures full bodies" not in banner
+    assert "captures full response bodies" not in banner
+
+
+def test_forensic_mode_banner_describes_forensic_capture():
+    config = inv.forensic_config_from_args(inv.parse_cli_args(["--forensic"]))
+    banner = " ".join(inv.active_session_banner(config)).lower()
+    assert "forensic mode" in banner
+    assert "full response bodies" in banner
+    assert "cookie jar" in banner
+
+
+def test_rewriting_banner_warns_it_is_not_observation():
+    config = inv.forensic_config_from_args(
+        inv.parse_cli_args(["--forensic", "--rewrite-source", "app.js:f"]))
+    banner = " ".join(inv.active_session_banner(config)).lower()
+    assert "not pure observation" in banner

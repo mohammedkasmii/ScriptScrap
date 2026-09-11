@@ -1639,6 +1639,39 @@ def forensic_config_from_args(args):
     )
 
 
+def active_session_banner(forensic_config) -> list[str]:
+    """What the running capture is ACTUALLY recording, per mode.
+
+    Normal mode records user actions, network requests with a small SAMPLE of
+    each response body, DOM/form inventories, storage snapshots and periodic
+    visual snapshots. It does NOT capture full response bodies, script source,
+    or the real cookie jar -- claiming it did was the old banner's error.
+    Forensic mode adds exactly those, via the extension, and says so.
+    """
+    forensic = bool(forensic_config and forensic_config.enabled)
+    lines = [
+        "🟢 CAPTURE IS ACTIVE — " + ("FORENSIC mode" if forensic else "NORMAL mode"),
+        "1. Give the browser to the employee; let them work normally.",
+    ]
+    if forensic:
+        lines += [
+            "2. Recording: user actions, network traffic, DOM/form inventories,",
+            "   storage snapshots, and — via the extension — FULL response bodies,",
+            "   script source before parse, and the real cookie jar (incl. httpOnly).",
+        ]
+        if forensic_config.rewriting_active:
+            lines.append("   SOURCE REWRITING is ACTIVE: this session is not pure observation.")
+    else:
+        lines += [
+            "2. Recording: user actions, network requests with a SAMPLE of each",
+            "   response body, DOM/form inventories and storage snapshots. This",
+            "   mode does NOT capture full bodies, script source or the cookie jar;",
+            "   run with --forensic for those.",
+        ]
+    lines.append("3. Press ENTER in this terminal ONLY when the whole session is done.")
+    return lines
+
+
 async def main(argv=None):
     _configure_stdout()
     args = parse_cli_args(argv)
@@ -1698,10 +1731,8 @@ async def main(argv=None):
             scanner_task = asyncio.create_task(background_dom_scanner(page, engine))
 
             print("\n" + "=" * 60)
-            print("🟢 AUTOMATIC SPY IS ACTIVE")
-            print("1. Interact with the website normally (process a Garage Conventionné dossier).")
-            print("2. The script captures full bodies, OpenAPI specs, and JS functions automatically.")
-            print("3. Press ENTER in this terminal ONLY when you are done.")
+            for line in active_session_banner(forensic_config):
+                print(line)
             print("=" * 60 + "\n")
 
             await asyncio.to_thread(input, "")
