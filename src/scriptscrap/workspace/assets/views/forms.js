@@ -66,11 +66,14 @@ function valueCell(c) {
 
 function stateCell(c) {
   const bits = [];
+  if (c.kind === 'combobox') bits.push('combobox');
   if (c.checked != null) bits.push(c.checked ? 'checked' : 'unchecked');
   if (c.required) bits.push('required');
   if (c.disabled) bits.push('disabled');
   if (c.readonly) bits.push('readonly');
-  if (c.options && c.options.length) bits.push(`${c.options.length} option(s)`);
+  if (c.options && c.options.length) {
+    bits.push(`${c.options.length} option(s)${c.options_complete ? '' : ' (partial)'}`);
+  }
   return bits.join(', ') || '—';
 }
 

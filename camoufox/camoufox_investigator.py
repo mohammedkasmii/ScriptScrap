@@ -417,26 +417,64 @@ DOM_PROBE_JS = """
         return results;
     }
 
+    const labelText = (el) => {
+        try {
+            if (el.labels && el.labels.length) {
+                return (el.labels[0].textContent || "").trim().slice(0, 120);
+            }
+            const aria = el.getAttribute && el.getAttribute("aria-label");
+            if (aria) return aria.trim().slice(0, 120);
+            const by = el.getAttribute && el.getAttribute("aria-labelledby");
+            if (by) {
+                const t = document.getElementById(by);
+                if (t) return (t.textContent || "").trim().slice(0, 120);
+            }
+            const wrap = el.closest && el.closest("label");
+            if (wrap) return (wrap.textContent || "").trim().slice(0, 120);
+        } catch (e) { /* ignore */ }
+        return null;
+    };
+
+    // Same boundary the runtime probe applies: a password/secret/token field's
+    // value is never captured, only that it exists. The DOM scan reads el.value
+    // directly, so without this a hidden CSRF token or a filled password would
+    // land in DOM_FORMS in the clear.
+    const SECRET_NAME = /pass|pwd|secret|token|otp|cvv|cvc/i;
+    const isSecretField = (el, type) =>
+        type === "password" ||
+        SECRET_NAME.test(((el.name || "") + " " + (el.id || "")));
+
     const parseElement = (el) => {
         const tag = el.tagName.toLowerCase();
         const type = (el.type || "").toLowerCase();
+        const secret = isSecretField(el, type);
         const base = {
             tag, type,
             name: el.name || el.getAttribute("name") || null,
             id: el.id || null,
             placeholder: el.placeholder || el.getAttribute("placeholder") || null,
+            // So an untouched but visible control is fully described offline.
+            label: labelText(el),
+            required: !!el.required,
+            disabled: !!el.disabled,
+            readonly: !!el.readOnly,
         };
 
         if (tag === "select") {
+            // Every option, value AND visible label -- the whole catalog, not
+            // just the one the operator happened to choose.
             base.options = Array.from(el.options).map(o => ({
-                value: o.value, text: (o.text || "").trim()
+                value: o.value, text: (o.text || "").trim(), selected: !!o.selected
             }));
+            base.value = el.value;
+            base.multiple = !!el.multiple;
         } else if (["checkbox", "radio"].includes(type)) {
             base.value = el.value;
             base.checked = el.checked;
         } else if (el.value !== undefined) {
-            base.value = el.value;
+            base.value = secret ? null : el.value;
         }
+        if (secret) base.secret = true;
         return base;
     };
 
