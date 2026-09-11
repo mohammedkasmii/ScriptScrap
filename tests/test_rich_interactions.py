@@ -132,6 +132,26 @@ def test_scrolling_a_virtualized_table_harvests_new_rows(log):
     assert any(s.get("table", {}).get("visible_rows") for s in scrolls)
 
 
+def test_rich_interactions_record_provenance(log):
+    """isTrusted is on every hover/drag/scroll, and a synthetic drag is honestly
+    NOT marked as a trusted employee action.
+
+    Note the asymmetry: a synthetic DragEvent dispatched by script has
+    isTrusted === false, so a drag that was not a real human drag is flagged.
+    A scroll event, however, is dispatched by the browser with isTrusted ===
+    true even when the scroll position was set programmatically -- the flag
+    cannot distinguish a programmatic scroll there -- so it is recorded but not
+    asserted false. The table catalog never says "the employee scrolled"; it
+    records rows observed_via scroll, which is a fact regardless of the driver.
+    """
+    for etype in (EventType.USER_HOVER, EventType.USER_DRAG, EventType.USER_SCROLL):
+        for p in _payloads(log, etype):
+            assert "trusted" in p, f"{etype} lost its isTrusted provenance"
+    # The fixture button dispatches synthetic DragEvents -- not a real drag.
+    assert all(p.get("trusted") is False for p in _payloads(log, EventType.USER_DRAG)), \
+        "a synthetic drag was recorded as a trusted employee action"
+
+
 def test_the_table_catalog_accumulates_virtualized_rows(log):
     from scriptscrap.analysis import analyze_events
 

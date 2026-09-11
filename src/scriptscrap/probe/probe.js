@@ -693,7 +693,7 @@
         if (now - last < HOVER_DEDUP_MS) return;
         hoverSeen.set(target, now);
         if (hoverSeen.size > 200) hoverSeen.clear();   // bounded
-        emit("user_hover", { element: fingerprint(target) });
+        emit("user_hover", { element: fingerprint(target), trusted: !!ev.isTrusted });
       });
     }, { capture: true, passive: true });
 
@@ -704,7 +704,8 @@
     document.addEventListener("dragstart", (ev) => {
       guard("user_drag_start", () => {
         dragSource = fingerprint(ev.target);
-        emit("user_drag", { phase: "start", drag_source: dragSource });
+        emit("user_drag", { phase: "start", drag_source: dragSource,
+                            trusted: !!ev.isTrusted });
       });
     }, { capture: true, passive: true });
     document.addEventListener("drop", (ev) => {
@@ -720,6 +721,7 @@
         emit("user_drag", {
           phase: "drop", drag_source: dragSource,
           drag_destination: fingerprint(ev.target), files: files,
+          trusted: !!ev.isTrusted,
         });
         dragSource = null;
       });
@@ -730,7 +732,8 @@
         // drop). Recorded so an abandoned drag is distinguishable from one that
         // landed.
         if (dragSource) {
-          emit("user_drag", { phase: "cancel", drag_source: dragSource });
+          emit("user_drag", { phase: "cancel", drag_source: dragSource,
+                              trusted: !!ev.isTrusted });
           dragSource = null;
         }
       });
@@ -742,6 +745,7 @@
     // not to log every pixel of page scroll.
     let scrollTimer = null;
     let scrollTarget = null;
+    let scrollTrusted = false;
     document.addEventListener("scroll", (ev) => {
       const node = ev.target;
       let table = null;
@@ -755,6 +759,9 @@
       } catch (e) { table = null; }
       if (!table) return;
       scrollTarget = table;
+      // Captured now, because the event object is stale inside the debounce.
+      // A programmatic scroll (isTrusted === false) is NOT an employee action.
+      scrollTrusted = !!ev.isTrusted;
       if (scrollTimer !== null) return;
       scrollTimer = setTimeout(() => {
         scrollTimer = null;
@@ -762,7 +769,7 @@
           if (!scrollTarget) return;
           const ctx = tableContext(scrollTarget) || {};
           ctx.visible_rows = visibleTableRows(scrollTarget, 60);
-          emit("user_scroll", { reason: "scroll", table: ctx });
+          emit("user_scroll", { reason: "scroll", table: ctx, trusted: scrollTrusted });
           scrollTarget = null;
         });
       }, 300);
