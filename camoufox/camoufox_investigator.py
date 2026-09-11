@@ -44,7 +44,20 @@ except ImportError:  # pragma: no cover - exercised only in a bare venv
     FORENSIC = None
     EVENTS_AVAILABLE = False
 
-OUTPUT_DIR = Path("v13_investigation_output")
+# Where a session writes, when nothing else is chosen. Each investigation gets
+# its OWN directory: a fixed global path let two sessions append to one
+# events.jsonl, which mixed two sessions' evidence into one unreadable log. The
+# default is timestamped to microseconds so two captures started in the same
+# second still land in separate directories.
+DEFAULT_OUTPUT_ROOT = Path("scriptscrap_output")
+
+
+class OutputInUse(RuntimeError):
+    """The chosen output directory already holds another session's log."""
+
+
+def default_output_dir() -> Path:
+    return DEFAULT_OUTPUT_ROOT / datetime.now(UTC).strftime("session-%Y%m%d-%H%M%S-%f")
 
 NOISY_ENDPOINTS = {
     "iadvize.com", "usejimo.com", "iconify.design", "privacy-center.org",
@@ -440,9 +453,11 @@ DOM_PROBE_JS = """
 """
 
 class WebHarvester:
-    def __init__(self, target_url: str, scope: InvestigationScope, session_id: str | None = None):
+    def __init__(self, target_url: str, scope: InvestigationScope,
+                 session_id: str | None = None, output_dir=None):
         self.target_url = target_url
         self.scope = scope
+        self.output_dir = Path(output_dir) if output_dir is not None else default_output_dir()
         self.endpoints = {}
         self._last_form_inventory = None
         # Pessimistic by default. A session whose teardown raised leaves a
@@ -508,18 +523,35 @@ class WebHarvester:
         self.launch_options_record = {}
         self.started_at = datetime.now(UTC)
 
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        self.visual_dir = OUTPUT_DIR / "visual_traces"
+        # --- event spine ---------------------------------------------------
+        # Written incrementally so a crash cannot destroy the session history.
+        self.session_id = session_id or datetime.now(UTC).strftime("sess-%Y%m%d-%H%M%S")
+
+        # Refuse to write into a directory that already holds a session log.
+        # Appending would interleave two sessions' events under two session ids
+        # in one file, which the reader flags as `mixed_sessions` and which no
+        # downstream analysis can un-mix. A fresh timestamped directory never
+        # trips this; an explicit --output pointing at a used directory does,
+        # deliberately. Resume is intentionally NOT supported: continuing a log
+        # correctly means restoring the sequence and event counter, and a
+        # half-done resume that restarts `seq` at 1 is worse than a clean
+        # refusal.
+        log_path = self.output_dir / "events.jsonl"
+        if log_path.exists() and log_path.stat().st_size > 0:
+            raise OutputInUse(
+                f"{log_path} already holds a session's events. Each "
+                f"investigation writes its own directory; choose an empty "
+                f"--output, or move the existing capture aside.")
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.visual_dir = self.output_dir / "visual_traces"
         self.visual_dir.mkdir(parents=True, exist_ok=True)
         self.step_counter = 1
 
-        # --- event spine, dual-write ---------------------------------------
-        # Written incrementally so a crash cannot destroy the session history.
-        self.session_id = session_id or datetime.now(UTC).strftime("sess-%Y%m%d-%H%M%S")
         self.event_log = None
         if EVENTS_AVAILABLE:
             try:
-                self.event_log = EV.EventLog(OUTPUT_DIR / "events.jsonl", self.session_id)
+                self.event_log = EV.EventLog(log_path, self.session_id)
                 self.event_log.emit(
                     EV.Source.ENGINE,
                     EV.EventType.SESSION_START,
@@ -1300,16 +1332,16 @@ class WebHarvester:
         # docstring with nothing checking it.
 
         # Session manifest: makes the evidence self-describing.
-        (OUTPUT_DIR / "session_manifest.json").write_text(
+        (self.output_dir / "session_manifest.json").write_text(
             json.dumps(self.build_manifest(), indent=2, ensure_ascii=False), encoding="utf-8")
 
-        (OUTPUT_DIR / "SECURITY.md").write_text(SECURITY_NOTICE, encoding="utf-8")
+        (self.output_dir / "SECURITY.md").write_text(SECURITY_NOTICE, encoding="utf-8")
 
         # Close the event spine last: it records the session end.
         self.close_events()
 
-        written = sorted(p.name for p in OUTPUT_DIR.glob("*.*"))
-        print(f"\n🏆 Exported {len(written)} files + visual traces to ./{OUTPUT_DIR.name}/")
+        written = sorted(p.name for p in self.output_dir.glob("*.*"))
+        print(f"\n🏆 Exported {len(written)} files + visual traces to ./{self.output_dir.name}/")
         print(f"   In-scope endpoints: {len(self.endpoints)} | "
               f"out-of-scope (metadata only): {len(self.out_of_scope_endpoints)}")
         print("   ⚠  This directory contains unredacted authenticated capture. "
@@ -1331,7 +1363,7 @@ def start_forensic_layer(engine, forensic_config):
 
     engine.forensic_config = forensic_config
     try:
-        blob_root = OUTPUT_DIR / "blobs"
+        blob_root = engine.output_dir / "blobs"
         engine.blob_store = SENSORS.BlobStore(
             blob_root, max_bytes=forensic_config.max_blob_bytes)
         engine.extension_sensor = SENSORS.ExtensionSensor(engine, engine.blob_store)
@@ -1569,6 +1601,11 @@ def parse_cli_args(argv=None):
     parser.add_argument(
         "--headless", action="store_true",
         help="run without a visible window (for an automated capture).")
+    parser.add_argument(
+        "--output", "-o", default=None, metavar="DIR",
+        help="write this session here. Default: a timestamped directory under "
+             "scriptscrap_output/. Each investigation gets its own directory; "
+             "the tool refuses to write into one that already holds a session.")
     return parser.parse_args(argv)
 
 
@@ -1612,7 +1649,12 @@ async def main(argv=None):
         target_url = "https://" + target_url
 
     scope = prompt_for_scope(target_url)
-    engine = WebHarvester(target_url, scope)
+    output_dir = Path(args.output) if args.output else default_output_dir()
+    try:
+        engine = WebHarvester(target_url, scope, output_dir=output_dir)
+    except OutputInUse as exc:
+        raise SystemExit(str(exc)) from None
+    print(f"[OUTPUT] This session -> {engine.output_dir}")
 
     # exclude_addons is load-bearing: Camoufox installs uBlock Origin as a
     # default addon, which silently filters requests out of the capture.

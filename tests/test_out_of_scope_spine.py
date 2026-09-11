@@ -41,9 +41,10 @@ class _Response:
 
 @pytest.fixture
 def engine(tmp_path):
-    inv = load_investigator(tmp_path / "output")
+    inv = load_investigator()
     scope = inv.InvestigationScope("https://app.test")
-    harvester = inv.WebHarvester("https://app.test", scope, session_id="sess-test")
+    harvester = inv.WebHarvester("https://app.test", scope, session_id="sess-test",
+                                 output_dir=tmp_path / "output")
     yield harvester
     with contextlib.suppress(Exception):
         harvester.close_events()

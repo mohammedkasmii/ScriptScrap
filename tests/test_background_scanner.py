@@ -32,7 +32,8 @@ async def _run(tmp_path) -> tuple[int, EventLogReader]:
 
     with FixtureServer() as fixture:
         scope = inv.InvestigationScope(fixture.base_url)
-        engine = inv.WebHarvester(fixture.base_url, scope, session_id="sess-20260101-000000")
+        engine = inv.WebHarvester(fixture.base_url, scope,
+                                  session_id="sess-20260101-000000", output_dir=out)
         engine.record_launch_options({"headless": True})
 
         async with AsyncCamoufox(

@@ -28,7 +28,8 @@ async def _run(tmp_path):
 
     with FixtureServer() as fx:
         scope = inv.InvestigationScope(fx.base_url)
-        engine = inv.WebHarvester(fx.base_url, scope, session_id="sess-20260101-000000")
+        engine = inv.WebHarvester(fx.base_url, scope,
+                                  session_id="sess-20260101-000000", output_dir=out)
         engine.record_launch_options({"headless": True})
 
         async with AsyncCamoufox(

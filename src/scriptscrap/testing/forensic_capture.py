@@ -31,7 +31,7 @@ async def run_forensic_investigation(
 
     from ..fixture import FixtureServer
 
-    inv = load_investigator(output_dir)
+    inv = load_investigator()
     config = forensic or ForensicConfig(
         enabled=True,
         # Small on purpose: the fixture's /api/big must cross it so the
@@ -43,7 +43,8 @@ async def run_forensic_investigation(
     with FixtureServer() as fixture:
         base = fixture.base_url
         scope = inv.InvestigationScope(base)
-        engine = inv.WebHarvester(base, scope, session_id=FIXED_SESSION_ID)
+        engine = inv.WebHarvester(base, scope, session_id=FIXED_SESSION_ID,
+                                  output_dir=output_dir)
 
         launch_options = {
             "headless": headless,

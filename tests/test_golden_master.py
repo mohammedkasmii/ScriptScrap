@@ -305,9 +305,10 @@ def test_the_investigator_retains_no_unwritten_network_log(investigation_output)
     introduced to eliminate."""
     from scriptscrap.testing.capture import load_investigator
 
-    module = load_investigator(investigation_output)
+    module = load_investigator()
     scope = module.InvestigationScope("http://127.0.0.1:1")
-    engine = module.WebHarvester("http://127.0.0.1:1", scope, session_id="s")
+    engine = module.WebHarvester("http://127.0.0.1:1", scope, session_id="s",
+                                 output_dir=investigation_output / "_buffers_probe")
     dead = [name for name in
             ("network_log", "dom_snapshots", "value_dependencies",
              "openapi_paths", "out_of_scope", "value_origins")

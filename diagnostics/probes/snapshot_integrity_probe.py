@@ -251,9 +251,8 @@ async def main() -> int:
 
     inv = load_investigator()
     tmpdir = Path(tempfile.mkdtemp(prefix="scriptscrap_snapshot_probe_"))
-    inv.OUTPUT_DIR = tmpdir
     scope = inv.InvestigationScope(url)
-    engine = inv.WebHarvester(url, scope)
+    engine = inv.WebHarvester(url, scope, output_dir=tmpdir)
 
     print("=" * 74)
     print("SNAPSHOT INTEGRITY PROBE (F-03)")
