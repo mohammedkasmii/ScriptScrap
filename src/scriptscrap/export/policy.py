@@ -357,6 +357,7 @@ _CAPTURE_GAP_CODES = frozenset({
     "out_of_scope", "frame_out_of_scope", "visual_capture_out_of_scope",
     "response_body_unavailable", "stylesheet_not_readable",
     "indexed_db_not_captured", "cache_storage_not_captured",
+    "indexed_db_values_not_captured", "cache_storage_bodies_not_captured",
     "websocket_handshake_headers_unavailable", "websocket_payload_truncated",
     "service_worker_visibility_unavailable", "runtime_probe_unavailable",
     "runtime_buffers_read_once_at_exit",

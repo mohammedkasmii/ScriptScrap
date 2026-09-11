@@ -102,6 +102,29 @@ async def _run(tmp_path):
             await page.set_input_files("#justificatif", str(upload))
             await page.wait_for_timeout(200)
 
+            # Populate IndexedDB and Cache Storage so the inventory has
+            # something to find. Done from the driver rather than the fixture
+            # so the golden page is untouched.
+            await page.evaluate("""async () => {
+                await new Promise((resolve, reject) => {
+                    const req = indexedDB.open('fixture-idb', 1);
+                    req.onupgradeneeded = () =>
+                        req.result.createObjectStore('rows', { keyPath: 'id' });
+                    req.onsuccess = () => {
+                        const db = req.result;
+                        const tx = db.transaction('rows', 'readwrite');
+                        tx.objectStore('rows').put({ id: 1, v: 'fixture' });
+                        tx.oncomplete = () => { db.close(); resolve(); };
+                    };
+                    req.onerror = () => reject(req.error);
+                });
+                if (typeof caches !== 'undefined') {
+                    const cache = await caches.open('fixture-cache-v1');
+                    await cache.put('/cached-resource',
+                                    new Response('cached body'));
+                }
+            }""")
+
             await engine.storage_sensor.snapshot(page, reason="mid_session")
 
             # -- navigation survival ----------------------------------
@@ -432,6 +455,33 @@ def test_storage_snapshot_includes_cookies_and_web_storage(log):
     latest = snapshots[-1]
     assert latest["local_storage"].get("fixtureToken") == "LOCAL-FIXTURE-0001"
     assert any(c["name"] == "fixture_session" for c in latest["cookies"])
+
+
+def test_indexed_db_is_inventoried_not_just_reported_missing(log):
+    """Database and object-store names with record counts -- what Firefox can
+    actually give -- rather than a blanket 'not captured'."""
+    snapshots = _payloads(log, EventType.STORAGE_SNAPSHOT)
+    inventoried = [s for s in snapshots
+                   if (s.get("indexed_db") or {}).get("databases")]
+    assert inventoried, "IndexedDB was never inventoried"
+    dbs = inventoried[-1]["indexed_db"]["databases"]
+    fixture_db = next((d for d in dbs if d["name"] == "fixture-idb"), None)
+    assert fixture_db is not None, [d["name"] for d in dbs]
+    rows = next(s for s in fixture_db["stores"] if s["name"] == "rows")
+    assert rows["count"] == 1
+    # The narrower, honest gap: names and counts captured, values not read.
+    reasons = {g.payload["reason"] for g in log.of_type(EventType.CAPTURE_GAP)}
+    assert "indexed_db_values_not_captured" in reasons
+    assert "indexed_db_not_captured" not in reasons
+
+
+def test_cache_storage_is_inventoried(log):
+    snapshots = _payloads(log, EventType.STORAGE_SNAPSHOT)
+    inventoried = [s for s in snapshots
+                   if (s.get("cache_storage") or {}).get("caches")]
+    assert inventoried, "Cache Storage was never inventoried"
+    caches = inventoried[-1]["cache_storage"]["caches"]
+    assert any(c["name"] == "fixture-cache-v1" for c in caches)
 
 
 def test_dom_mutations_are_emitted_as_bounded_batches(log):

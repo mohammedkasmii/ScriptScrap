@@ -1160,7 +1160,9 @@ class WebHarvester:
                 "WebSocket handshake headers are not exposed by Playwright, so auth "
                 "sent on the upgrade is unobserved. Frames themselves ARE captured.",
                 "httpOnly cookie changes are only visible as periodic snapshots, not "
-                "as a change stream. IndexedDB and Cache Storage are not captured.",
+                "as a change stream. IndexedDB and Cache Storage are INVENTORIED "
+                "(database/store names with record counts, cached request URLs) but "
+                "their record values and cached response bodies are not read.",
                 "Legacy named-function hooks run on a 2s interval and miss calls made "
                 "during initial page parse. Proven unsolvable from injected JS; "
                 "source rewriting is a later, gated capability.",
@@ -1469,8 +1471,72 @@ def announce_browser_baseline(engine) -> dict:
     return comparison
 
 
-async def main():
+def parse_cli_args(argv=None):
+    """Flags for a real agency session. The URL and scope stay interactive.
+
+    Forensic mode is off by default, and source rewriting -- the one thing that
+    changes what the browser executes -- is a SEPARATE flag, because observation
+    and intervention must not share a switch.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="camoufox_investigator",
+        description="Record a long agency session for offline analysis.")
+    parser.add_argument(
+        "--forensic", action="store_true",
+        help="enable the Firefox forensic extension: full response bodies, "
+             "script source before parse, and the real cookie jar (httpOnly). "
+             "Off by default; whatever is enabled is written into the manifest.")
+    parser.add_argument(
+        "--forensic-max-body-bytes", type=int, default=2 * 1024 * 1024,
+        help="largest response body the forensic layer stores (default 2 MiB); "
+             "larger bodies are recorded as skipped with a reason.")
+    parser.add_argument(
+        "--rewrite-source", action="append", default=[], metavar="SCRIPT:fn1,fn2",
+        help="INTERVENTION, requires --forensic: instrument named functions in a "
+             "matching script from their first execution. This alters the code "
+             "the browser runs; every rewritten script records both hashes.")
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="run without a visible window (for an automated capture).")
+    return parser.parse_args(argv)
+
+
+def forensic_config_from_args(args):
+    """Build a ForensicConfig from the parsed flags, or None for normal mode.
+
+    Enforces the gate: source rewriting cannot be requested without forensic
+    mode, and it is never turned on as a side effect of enabling forensic mode.
+    """
+    from scriptscrap.config import ForensicConfig, RewriteTarget
+
+    if args.rewrite_source and not args.forensic:
+        raise SystemExit(
+            "--rewrite-source requires --forensic: rewriting a response before "
+            "the browser parses it is intervention, and it must be asked for "
+            "on top of forensic capture, never on its own.")
+    if not args.forensic:
+        return None
+
+    targets = []
+    for spec in args.rewrite_source:
+        script, _, functions = spec.partition(":")
+        names = [f.strip() for f in functions.split(",") if f.strip()]
+        if script and names:
+            targets.append(RewriteTarget(script=script.strip(), functions=names))
+    return ForensicConfig(
+        enabled=True,
+        max_body_bytes=args.forensic_max_body_bytes,
+        source_rewrite=bool(targets),
+        rewrite_targets=targets,
+    )
+
+
+async def main(argv=None):
     _configure_stdout()
+    args = parse_cli_args(argv)
+    forensic_config = forensic_config_from_args(args)
 
     target_url = input("Enter Target Portal URL: ").strip()
     if not target_url.startswith("http"):
@@ -1486,7 +1552,7 @@ async def main():
     # patched instruments land in the isolated world and observe nothing, which
     # is exactly how a whole capture came back with zero fetch/XHR evidence.
     launch_options = {
-        "headless": False,
+        "headless": args.headless,
         "humanize": True,
         "os": "windows",
         "geoip": False,
@@ -1494,6 +1560,16 @@ async def main():
         "exclude_addons": [DefaultAddons.UBO],
         "main_world_eval": True,
     }
+    # Forensic mode must be brought up BEFORE launch: the extension is built
+    # with the transport port baked in. Non-fatal by design -- a transport that
+    # cannot bind costs the extra evidence, not the session.
+    if forensic_config is not None:
+        launch_options.update(start_forensic_layer(engine, forensic_config))
+        print("    [forensic] extension enabled — bodies, script source, real "
+              "cookie jar. See the manifest for exactly what is on.")
+        if forensic_config.rewriting_active:
+            print("    [forensic] SOURCE REWRITING ACTIVE — this session is NOT "
+                  "pure observation.")
     engine.record_launch_options(launch_options)
 
     print("\n🦊 [CAMOUFOX] Booting active introspection engine...")
@@ -1531,6 +1607,8 @@ async def main():
         engine.outcome = "failed"
         print(f"\n⚠️ Session ended with an error: {e}")
     finally:
+        if forensic_config is not None:
+            stop_forensic_layer(engine)
         engine.export()
 
 if __name__ == "__main__":
