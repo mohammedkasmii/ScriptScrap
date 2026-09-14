@@ -8,6 +8,12 @@ understand and automate the platform.
 Capture is observation-first: it must never become the reason the application
 behaves differently. An optional forensic layer goes deeper, and says so.
 
+> **Recording at the agency:** follow the
+> [agency capture runbook](AGENCY_CAPTURE_RUNBOOK.md). After the first install,
+> `Start-Agency-Capture.ps1` starts maximum passive forensic capture, creates a
+> unique session folder, and runs health, analysis and export when the employee
+> finishes.
+
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/) and a fetched Camoufox browser.
@@ -28,6 +34,14 @@ Administrator rights and preinstalled development tools are not required.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-ScriptScrap.ps1
+```
+
+For day-of-use commands, employee instructions, clean shutdown, validation and
+copying the complete session, use [`AGENCY_CAPTURE_RUNBOOK.md`](AGENCY_CAPTURE_RUNBOOK.md).
+The maximum passive capture can then be started with one command:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Agency-Capture.ps1
 ```
 
 The first installation requires HTTPS access to `astral.sh`, the Python package
