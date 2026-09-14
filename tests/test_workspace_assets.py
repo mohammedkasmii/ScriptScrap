@@ -17,6 +17,7 @@ Two of these are security properties rather than tidiness:
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -180,6 +181,7 @@ def test_no_asset_contains_a_control_character():
         "assets must contain no control characters:\n" + "\n".join(offenders))
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 def test_every_asset_is_text_to_git(tmp_path):
     """`git diff` must render every asset. A binary asset cannot be reviewed.
 

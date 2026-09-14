@@ -21,8 +21,8 @@ Run:  uv run diagnostics/check_environment.py
 from __future__ import annotations
 
 import importlib.metadata
-import subprocess
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -144,24 +144,59 @@ def check_addon_cache() -> None:
         record(WARN, "downloaded addon cache", f"unreadable ({exc})")
 
 
+def _ignored_by_patterns(sample: str, patterns: list[str]) -> bool:
+    """Evaluate the ordinary glob/directory subset used by this `.gitignore`."""
+    path = sample.replace("\\", "/").strip("/")
+    parts = path.split("/")
+    ignored = False
+    for raw in patterns:
+        pattern = raw.strip()
+        if not pattern or pattern.startswith("#"):
+            continue
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:]
+        directory_only = pattern.endswith("/")
+        pattern = pattern.rstrip("/")
+        anchored = pattern.startswith("/")
+        pattern = pattern.lstrip("/")
+        if not pattern:
+            continue
+
+        if "/" in pattern or anchored:
+            directories = ["/".join(parts[:i]) for i in range(1, len(parts))]
+            matched = any(fnmatch(directory, pattern) for directory in directories)
+            if not directory_only:
+                matched = matched or fnmatch(path, pattern)
+        else:
+            candidates = parts[:-1] if directory_only else parts
+            matched = any(fnmatch(part, pattern) for part in candidates)
+        if matched:
+            ignored = not negated
+    return ignored
+
+
 def check_gitignore() -> None:
-    """Sensitive output must be un-committable, by pattern rather than by name."""
+    """Sensitive output must be ignored even in a GitHub ZIP without Git.
+
+    Calling `git check-ignore` requires repository metadata and a Git executable.
+    Neither exists on the clean agency PC promised by the installer, so inspect
+    the shipped `.gitignore` patterns directly.
+    """
     samples = [
         "v13_investigation_output/network_traffic.json",
         "camoufox/v13_investigation_output/generated_client.py",
         "v99_future_rename_output/x.json",
         "sessions/abc/events.jsonl",
     ]
-    leaks = []
-    for sample in samples:
-        # Fixed argument list; `sample` comes from the literal list above, never
-        # from user input. `git` is resolved from PATH by design.
-        proc = subprocess.run(  # noqa: S603
-            ["git", "check-ignore", "-q", "--", sample],  # noqa: S607
-            cwd=REPO, capture_output=True, check=False,
-        )
-        if proc.returncode != 0:
-            leaks.append(sample)
+    ignore_file = REPO / ".gitignore"
+    try:
+        patterns = ignore_file.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        record(FAIL, "gitignore covers output", f"could not read {ignore_file} ({exc})")
+        return
+
+    leaks = [sample for sample in samples if not _ignored_by_patterns(sample, patterns)]
 
     if leaks:
         record(FAIL, "gitignore covers output",

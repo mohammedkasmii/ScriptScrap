@@ -11,6 +11,7 @@ No browser is launched here. The probes themselves do that.
 
 from __future__ import annotations
 
+import runpy
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,22 @@ def test_websocket_sensor_really_does_subscribe_to_frames():
         encoding="utf-8")
     assert '"framesent"' in sensor
     assert '"framereceived"' in sensor
+
+
+def test_gitignore_check_works_in_a_github_zip_without_git_metadata(tmp_path):
+    """A clean agency PC has the shipped file but no `.git` directory."""
+    (tmp_path / ".gitignore").write_text(
+        "*_output/\nsessions/\n", encoding="utf-8")
+    namespace = runpy.run_path(str(REPO / "diagnostics" / "check_environment.py"))
+    check = namespace["check_gitignore"]
+    check.__globals__["REPO"] = tmp_path
+    namespace["results"].clear()
+
+    check()
+
+    assert namespace["results"] == [
+        ("PASS", "gitignore covers output", "4/4 sample output paths ignored")
+    ]
 
 
 def test_navigation_wipe_warning_names_only_what_still_suffers_it():
