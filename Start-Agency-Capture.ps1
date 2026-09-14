@@ -4,7 +4,8 @@ param(
         ([Environment]::GetFolderPath("MyDocuments")) "ScriptScrapCaptures"),
     [ValidateRange(1, 8388608)]
     [int]$MaxBodyBytes = 8388608,
-    [switch]$Normal
+    [switch]$Normal,
+    [switch]$CrossSiteSessionCompatibility
 )
 
 Set-StrictMode -Version Latest
@@ -72,6 +73,9 @@ try {
             "--forensic",
             "--forensic-max-body-bytes", ([string]$MaxBodyBytes)
         )
+    }
+    if ($CrossSiteSessionCompatibility) {
+        $CaptureArguments += "--cross-site-session-compatibility"
     }
 
     & $UvExe @CaptureArguments

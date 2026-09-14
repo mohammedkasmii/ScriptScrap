@@ -14,6 +14,7 @@ each validates.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,58 @@ def test_a_fresh_directory_is_accepted(tmp_path):
                               session_id="s1", output_dir=tmp_path / "s1")
     try:
         assert (tmp_path / "s1" / "events.jsonl").exists()
+    finally:
+        engine.close_events()
+
+
+def test_capture_refuses_to_start_when_the_initial_event_cannot_be_written(
+        tmp_path, monkeypatch):
+    class BrokenEventLog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def emit(self, *_args, **_kwargs):
+            return None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(inv.EV, "EventLog", BrokenEventLog)
+
+    with pytest.raises(inv.CaptureLogUnavailable, match="initial event"):
+        inv.WebHarvester(
+            "https://app.test", inv.InvestigationScope("https://app.test"),
+            session_id="s1", output_dir=tmp_path / "blocked",
+        )
+
+
+def test_manifest_event_count_includes_session_end(tmp_path):
+    out = tmp_path / "complete"
+    engine = inv.WebHarvester(
+        "https://app.test", inv.InvestigationScope("https://app.test"),
+        session_id="s1", output_dir=out,
+    )
+    engine.outcome = "clean"
+    engine.export()
+
+    manifest = json.loads((out / "session_manifest.json").read_text(encoding="utf-8"))
+    lines = [line for line in (out / "events.jsonl").read_text(
+        encoding="utf-8").splitlines() if line]
+    assert manifest["event_spine"]["events_emitted"] == len(lines)
+
+
+def test_periodic_checkpoint_prints_a_live_recording_heartbeat(tmp_path, capsys):
+    engine = inv.WebHarvester(
+        "https://app.test", inv.InvestigationScope("https://app.test"),
+        session_id="s1", output_dir=tmp_path / "heartbeat",
+    )
+    try:
+        engine._http_requests = 3
+        engine.checkpoint(reason="periodic")
+        output = capsys.readouterr().out
+        assert "[CAPTURE] active" in output
+        assert "events" in output
+        assert "3 network" in output
     finally:
         engine.close_events()
 

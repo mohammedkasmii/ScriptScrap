@@ -56,6 +56,10 @@ class OutputInUse(RuntimeError):
     """The chosen output directory already holds another session's log."""
 
 
+class CaptureLogUnavailable(RuntimeError):
+    """The authoritative event stream could not be started."""
+
+
 def default_output_dir() -> Path:
     return DEFAULT_OUTPUT_ROOT / datetime.now(UTC).strftime("session-%Y%m%d-%H%M%S-%f")
 
@@ -625,18 +629,29 @@ class WebHarvester:
         self.step_counter = 1
 
         self.event_log = None
-        if EVENTS_AVAILABLE:
-            try:
-                self.event_log = EV.EventLog(log_path, self.session_id)
-                self.event_log.emit(
+        if not EVENTS_AVAILABLE:
+            raise CaptureLogUnavailable(
+                "ScriptScrap's event package is unavailable. Run the investigator "
+                "through `uv run`; capture cannot continue without events.jsonl.")
+        try:
+            self.event_log = EV.EventLog(log_path, self.session_id)
+            started = self.event_log.emit(
                     EV.Source.ENGINE,
                     EV.EventType.SESSION_START,
                     target_url=target_url,
                     scope=scope.as_dict(),
                 )
-            except OSError as exc:
-                print(f"[events] disabled: {exc}")
+            if started is None:
+                self.event_log.close()
                 self.event_log = None
+                raise CaptureLogUnavailable(
+                    f"Could not write the initial event to {log_path}. Check the "
+                    "folder permissions and available disk space.")
+        except OSError as exc:
+            self.event_log = None
+            raise CaptureLogUnavailable(
+                f"Could not create {log_path}: {exc}. Choose a writable local "
+                "capture directory.") from exc
 
     # ==========================================
     # EVENT SPINE (dual-write)
@@ -672,7 +687,7 @@ class WebHarvester:
         self._checkpoints += 1
         self._last_checkpoint = datetime.now(UTC)
         elapsed = (self._last_checkpoint - self.started_at).total_seconds()
-        return self.emit_event(
+        event = self.emit_event(
             EV.Source.ENGINE,
             EV.EventType.CHECKPOINT,
             reason=reason,
@@ -683,6 +698,19 @@ class WebHarvester:
             pages_open=self.registry.snapshot().get("pages") if self.registry else None,
             elapsed_seconds=round(elapsed, 1),
         )
+        if reason == "periodic":
+            if event is None:
+                print("\n[CAPTURE ERROR] events.jsonl could not be updated. "
+                      "Stop relying on this session.", flush=True)
+            else:
+                print(
+                    f"\n[CAPTURE] active | {self.event_log.count} events | "
+                    f"{self._http_requests} network | "
+                    f"{self._sensor_errors} sensor errors | "
+                    f"{round(elapsed)}s",
+                    flush=True,
+                )
+        return event
 
     def close_events(self):
         if self.event_log is None:
@@ -1425,14 +1453,14 @@ class WebHarvester:
         # model and tested -- the retired one asserted its own safety in a
         # docstring with nothing checking it.
 
+        # Close first so SESSION_END is included in the manifest's event count.
+        self.close_events()
+
         # Session manifest: makes the evidence self-describing.
         (self.output_dir / "session_manifest.json").write_text(
             json.dumps(self.build_manifest(), indent=2, ensure_ascii=False), encoding="utf-8")
 
         (self.output_dir / "SECURITY.md").write_text(SECURITY_NOTICE, encoding="utf-8")
-
-        # Close the event spine last: it records the session end.
-        self.close_events()
 
         written = sorted(p.name for p in self.output_dir.glob("*.*"))
         print(f"\n🏆 Exported {len(written)} files + visual traces to ./{self.output_dir.name}/")
@@ -1881,6 +1909,11 @@ def parse_cli_args(argv=None):
         "--headless", action="store_true",
         help="run without a visible window (for an automated capture).")
     parser.add_argument(
+        "--cross-site-session-compatibility", action="store_true",
+        help="disable Firefox Total Cookie Protection for this temporary browser "
+             "profile while retaining cross-site tracker blocking. Use only for "
+             "authorised portals whose embedded login/session flow otherwise stalls.")
+    parser.add_argument(
         "--output", "-o", default=None, metavar="DIR",
         help="write this session here. Default: a timestamped directory under "
              "scriptscrap_output/. Each investigation gets its own directory; "
@@ -1964,9 +1997,10 @@ async def main(argv=None):
     output_dir = Path(args.output) if args.output else default_output_dir()
     try:
         engine = WebHarvester(target_url, scope, output_dir=output_dir)
-    except OutputInUse as exc:
+    except (OutputInUse, CaptureLogUnavailable) as exc:
         raise SystemExit(str(exc)) from None
     print(f"[OUTPUT] This session -> {engine.output_dir}")
+    print(f"[RECORDING] Event stream ready -> {engine.output_dir / 'events.jsonl'}")
 
     async def interact(page, engine):
         print("\n" + "=" * 60)
@@ -1975,12 +2009,37 @@ async def main(argv=None):
         print("=" * 60 + "\n")
         await asyncio.to_thread(input, "")
 
-    await run_capture(engine, target_url=target_url, forensic_config=forensic_config,
-                      headless=args.headless, interact=interact, announce=True)
+    await run_capture(
+        engine, target_url=target_url, forensic_config=forensic_config,
+        headless=args.headless, interact=interact, announce=True,
+        cross_site_session_compatibility=args.cross_site_session_compatibility,
+    )
+
+
+def browser_launch_options(*, headless, cross_site_session_compatibility=False):
+    """Build the observable base browser policy for one capture."""
+    options = {
+        "headless": headless,
+        "humanize": True,
+        "os": "windows",
+        "geoip": False,
+        "enable_cache": True,
+        "exclude_addons": [DefaultAddons.UBO],
+        "main_world_eval": True,
+    }
+    if cross_site_session_compatibility:
+        # Firefox value 4 blocks known cross-site tracking cookies without
+        # partitioning every other third-party cookie. Some embedded SSO and
+        # session-token flows break under Total Cookie Protection (value 5).
+        options["firefox_user_prefs"] = {
+            "network.cookie.cookieBehavior": 4,
+        }
+    return options
 
 
 async def run_capture(engine, *, target_url, forensic_config, headless, interact,
-                      locale="fr-FR", timezone_id="Europe/Paris", announce=False):
+                      locale="fr-FR", timezone_id="Europe/Paris", announce=False,
+                      cross_site_session_compatibility=False):
     """The one production capture runner, shared by the CLI and the tests.
 
     Launch -> attach sensors -> START COVERAGE (before the first navigation, so a
@@ -1994,15 +2053,13 @@ async def run_capture(engine, *, target_url, forensic_config, headless, interact
     # default addon, which silently filters requests out of the capture.
     # main_world_eval is equally load-bearing: without it the runtime probe's
     # patched instruments land in the isolated world and observe nothing.
-    launch_options = {
-        "headless": headless,
-        "humanize": True,
-        "os": "windows",
-        "geoip": False,
-        "enable_cache": True,
-        "exclude_addons": [DefaultAddons.UBO],
-        "main_world_eval": True,
-    }
+    launch_options = browser_launch_options(
+        headless=headless,
+        cross_site_session_compatibility=cross_site_session_compatibility,
+    )
+    if cross_site_session_compatibility and announce:
+        print("    [compatibility] cross-site session mode enabled for this "
+              "temporary browser profile.")
     if forensic_config is not None:
         launch_options.update(start_forensic_layer(engine, forensic_config))
         if announce:

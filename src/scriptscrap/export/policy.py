@@ -217,7 +217,7 @@ _LOCATOR_STRATEGIES = frozenset({
 # The elements a capture can record an interaction on. Author-controlled
 # markup can name anything; only these leave.
 _HTML_TAGS = frozenset({
-    "a", "button", "input", "select", "textarea", "option", "label", "form",
+    "a", "body", "button", "input", "select", "textarea", "option", "label", "form",
     "div", "span", "li", "td", "th", "tr", "summary", "details", "img",
     "svg", "path", "p", "h1", "h2", "h3", "h4", "h5", "h6", "b", "strong",
     "em", "i", "ins", "pre", "ul", "ol", "table", "tbody", "thead", "section", "nav",

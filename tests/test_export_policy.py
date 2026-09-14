@@ -179,6 +179,16 @@ def test_a_marker_in_every_string_field_never_survives_sanitisation():
     assert survivors == [], f"{len(survivors)} field(s) leaked: {survivors[:5]}"
 
 
+def test_a_standard_body_click_does_not_abort_the_shareable_export():
+    """Real pages emit body clicks; a standard HTML tag is a safe constant."""
+    result = _marked_result()
+    result.ui_elements[0].tag = "body"
+
+    safe = sanitise(result, Redactor())
+
+    assert safe.ui_elements[0].tag == "body"
+
+
 def test_sanitisation_keeps_the_analysis_useful():
     """Deny-by-default must not produce an export nobody can read."""
     safe = sanitise(_marked_result(), Redactor())

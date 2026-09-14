@@ -76,6 +76,19 @@ def test_headless_is_off_by_default_and_can_be_set():
     assert inv.parse_cli_args(["--headless"]).headless is True
 
 
+def test_cross_site_session_compatibility_is_explicit_opt_in():
+    assert inv.parse_cli_args([]).cross_site_session_compatibility is False
+    args = inv.parse_cli_args(["--cross-site-session-compatibility"])
+    assert args.cross_site_session_compatibility is True
+    normal = inv.browser_launch_options(headless=False)
+    compatible = inv.browser_launch_options(
+        headless=False, cross_site_session_compatibility=True)
+    assert "firefox_user_prefs" not in normal
+    assert compatible["firefox_user_prefs"] == {
+        "network.cookie.cookieBehavior": 4,
+    }
+
+
 def test_normal_mode_banner_does_not_claim_forensic_capture():
     """Normal mode must not CLAIM it captures full bodies or forensic evidence.
 

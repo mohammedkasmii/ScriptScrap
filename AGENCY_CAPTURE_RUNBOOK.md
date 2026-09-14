@@ -112,6 +112,31 @@ the employee.
 - Tell the operator when the entire recording session is finished.
 
 ScriptScrap writes events incrementally and adds a checkpoint every 30 seconds.
+The terminal prints a heartbeat every 30 seconds with the current event and
+network counts. If the event stream cannot be created, capture now stops before
+the employee starts working instead of continuing with an empty directory.
+
+### Portals with embedded cross-site sessions
+
+Some portals host their authentication or session-token service on another
+domain. Include every authorised service domain at the scope prompt. For
+OmegaFlow, use:
+
+```text
+knack.com, cloud-database.co, s3-eu-west-1.amazonaws.com
+```
+
+If the portal logs in but an embedded “validate session” action never finishes,
+retry with the temporary Firefox cross-site session compatibility option:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Agency-Capture.ps1 `
+  -CaptureRoot "$env:LOCALAPPDATA\ScriptScrapCaptures" `
+  -CrossSiteSessionCompatibility
+```
+
+This changes only the disposable Camoufox profile for that run. The session
+manifest records the Firefox preference that was used.
 
 ## End the recording correctly
 
