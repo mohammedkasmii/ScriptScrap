@@ -41,7 +41,9 @@ $Uv = Join-Path $env:LOCALAPPDATA "ScriptScrap\bin\uv.exe"
 
 Commit `85dc35a` expects Ruff to pass and pytest to report `1389 passed, 11
 skipped`. The environment check must report zero failures. Documented warnings
-are allowed.
+are allowed. The complete test suite also expects Git to be installed because
+one source-quality test asks Git whether the workspace assets are text files.
+Git is not required for agency capture itself.
 
 ## First installation on the agency PC
 
@@ -63,6 +65,11 @@ The installer must finish with:
 ```text
 ScriptScrap installation completed successfully.
 ```
+
+Do not run the complete pytest suite on the agency PC unless it was deliberately
+prepared as a development/validation machine with `-IncludeDeveloperTools` and
+Git. The installer environment check and browser smoke test are the operational
+checks required for capture.
 
 ## Start the employee recording
 

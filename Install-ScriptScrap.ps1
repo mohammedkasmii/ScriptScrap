@@ -30,12 +30,35 @@ function Assert-LastCommand {
 }
 
 function Get-InstalledCamoufoxBuild {
-    $BuildOutput = & $UvExe run --no-sync python -c `
-        "from camoufox.pkgman import installed_verstr; print(installed_verstr())" 2>$null
-    if ($LASTEXITCODE -ne 0 -or $null -eq $BuildOutput) {
+    # `installed_verstr()` raises when no browser has been downloaded yet. In
+    # Windows PowerShell 5.1 a native program writing that traceback to stderr
+    # becomes a terminating NativeCommandError under ErrorActionPreference=Stop,
+    # which used to abort a first-time install before the fetch step below.
+    # Inspect the active path instead: no active browser is a normal empty
+    # result, not an error.
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $BuildOutput = $null
+    $BuildExitCode = 1
+    try {
+        $ErrorActionPreference = "SilentlyContinue"
+        $BuildOutput = & $UvExe run --no-sync python -c `
+            "from camoufox.multiversion import get_active_path; from camoufox.pkgman import Version; p = get_active_path(); print(Version.from_path(p).full_string if p else '')" 2>$null
+        $BuildExitCode = $LASTEXITCODE
+    }
+    catch {
         return $null
     }
-    return ([string]($BuildOutput | Select-Object -Last 1)).Trim()
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($BuildExitCode -ne 0 -or $null -eq $BuildOutput) {
+        return $null
+    }
+    $Build = ([string]($BuildOutput | Select-Object -Last 1)).Trim()
+    if (-not $Build) {
+        return $null
+    }
+    return $Build
 }
 
 if ($env:OS -ne "Windows_NT") {
@@ -184,8 +207,8 @@ print("Camoufox launch smoke test passed.")
 
     Write-Host ""
     Write-Host "ScriptScrap installation completed successfully." -ForegroundColor Green
-    Write-Host "Start an investigation with:"
-    Write-Host "  & `"$UvExe`" run --no-sync python camoufox\camoufox_investigator.py"
+    Write-Host "Start a maximum passive agency capture with:"
+    Write-Host "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Agency-Capture.ps1"
     Write-Host ""
     Write-Host "The PC needs internet access during installation. After installation, normal capture and analysis can run without development tools."
 }
