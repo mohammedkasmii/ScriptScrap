@@ -209,6 +209,9 @@ _JSON_TYPES = frozenset({
     "null", "boolean", "integer", "number", "string", "opaque_token",
     "array", "object", "unknown",
 })
+# Endpoint path parameters also carry identifier classifications produced by
+# endpoints.py. Keep these separate from JSON schema root/field types.
+_PARAM_TYPES = _JSON_TYPES | frozenset({"uuid", "hash", "code"})
 # The strategies SelectorAnalyzer can produce.
 _LOCATOR_STRATEGIES = frozenset({
     "test_id", "role_name", "label", "placeholder", "name", "id", "text",
@@ -261,7 +264,7 @@ VOCABULARY: dict[tuple[str, str], frozenset[str] | re.Pattern[str]] = {
     ("Endpoint", "graphql_operation_type"): frozenset(
         {"query", "mutation", "subscription"}),
     ("ParamObservation", "location"): frozenset({"query", "path"}),
-    ("ParamObservation", "inferred_type"): _JSON_TYPES,
+    ("ParamObservation", "inferred_type"): _PARAM_TYPES,
     ("Schema", "direction"): frozenset({"request", "response"}),
     ("Schema", "root_type"): _JSON_TYPES,
     ("Schema", "status"): _STATUS_CODE,
@@ -325,6 +328,7 @@ _SENSOR_NAMES = frozenset({
 })
 _SENSOR_STATUSES = frozenset({
     "healthy", "degraded", "blind", "not_enabled", "not_applicable",
+    "unavailable", "unknown",
 })
 _SENSOR_METRIC_KEYS = frozenset({
     "requests", "responses", "failed", "events", "runtime_calls",

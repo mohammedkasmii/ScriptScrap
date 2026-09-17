@@ -138,6 +138,40 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Agency-Capture.p
 This changes only the disposable Camoufox profile for that run. The session
 manifest records the Firefox preference that was used.
 
+### Check actual recording before a long session
+
+For OmegaFlow, first let the employee sign in, navigate to a dossier list,
+search, open a dossier and visit another pagination page if available. In a
+second PowerShell window, inspect counts only (not captured values):
+
+```powershell
+# Match the -CaptureRoot used in the recording command.
+$CaptureRoot = "$env:LOCALAPPDATA\ScriptScrapCaptures"
+$Session = (Get-Content (Join-Path $CaptureRoot "LAST_CAPTURE.txt") -Raw).Trim()
+Get-Item (Join-Path $Session "events.jsonl") | Select-Object Length, LastWriteTime
+Get-Content (Join-Path $Session "events.jsonl") |
+  ForEach-Object { try { $_ | ConvertFrom-Json -ErrorAction Stop } catch {} } |
+  Group-Object type |
+  Where-Object { $_.Name -in @(
+    "user_click", "user_input", "user_change", "http_request",
+    "runtime_fetch", "runtime_xhr", "extension_request",
+    "response_body_captured", "dom_snapshot"
+  ) } |
+  Select-Object Name, Count
+```
+
+Repeat after further employee activity. Relevant action and network counts
+should increase, with DOM snapshots and captured response bodies present. A
+heartbeat alone proves the recorder is alive, not that work is being recorded.
+If only checkpoints increase despite active work, stop and preserve the short
+recording for diagnosis instead of recording for hours. Use the browser opened
+by ScriptScrap, and confirm the authorised API hosts are in scope.
+
+Finish this short recording with Enter and require health, analysis and export
+to finish before starting a separate long recording. Inspect the snapshots and
+API evidence for the screens just visited; sensor health alone does not prove
+that every required business screen was captured.
+
 ## End the recording correctly
 
 1. Leave the Camoufox window open.
